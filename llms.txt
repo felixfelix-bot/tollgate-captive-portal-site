@@ -1,0 +1,29 @@
+# net4sats Captive Portal
+
+> A captive portal website for [net4sats](https://net4sats.com). This portal allows users to paste a Cashu token or pay with BTC Lightning to gain internet access.
+
+Language: TypeScript/JavaScript
+Repository: https://github.com/net4sats/net4sats-captive-portal-site.git
+Local path: /home/c03rad0r/repos/net4sats-captive-portal-site
+
+## Quick Links
+- [README.md](README.md)
+- [LICENSE](LICENSE)
+- [package.json](package.json)
+
+## File Structure
+- public/
+- src/
+- LICENSE
+- README.md
+- balance.html
+- index.html
+- llms.txt
+- package.json
+- net4sats-captive-portal.png
+- vite.config.js
+
+## Notes for AI Assistants
+This is the **net4sats Captive Portal** project written in TypeScript/JavaScript.
+Purpose: A captive portal website for [net4sats](https://net4sats.com). This portal allows users to paste a Cashu token or pay with BTC Lightning to gain internet access.
+Read README.md for full documentation. Key configuration and entry points are listed in Quick Links above.

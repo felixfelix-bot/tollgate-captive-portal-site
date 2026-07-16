@@ -1,0 +1,345 @@
+// external
+import { useState, useRef, useEffect } from 'react';
+import { useTranslation, Trans } from 'react-i18next';
+import classNames from 'classnames';
+
+// internal
+import Background from './components/Background.jsx'
+import Cashu from './components/Cashu.jsx'
+import Lightning from './components/Lightning.jsx'
+import { BalancePage } from './components/BalancePage.jsx'
+import { Error } from './components/Status.jsx';
+import { AccessGrantedIcon, RadioButtonIcon, ErrorIcon } from './components/Icon.jsx'
+
+// helpers
+import { fetchnet4satsData, getStepSizeValues, getnet4satsBaseUrl } from './helpers/net4sats.js'
+
+// styles and assets
+import './App.scss'
+
+// import the net4sats logos
+import logoWhite from './assets/logo/net4sats-logo-white.png';
+
+// main component
+export const App = () => {
+  const { t, ready } = useTranslation();
+  const [method, setMethod] = useState('cashu');
+  const [net4satsDetails, setnet4satsDetails] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [deviceInfo, setDeviceInfo] = useState(null);
+  const [retrying, setRetrying] = useState(false);
+  const retryIntervalRef = useRef(null);
+
+  // initial data fetch on translation ready
+  useEffect(() => {
+    if (ready) {
+      const fetch = async () => {
+        setLoading(true);
+        const response = await fetchnet4satsData(t);
+
+        if (!response.status) {
+          setRetrying(true);
+          setError(response);
+        } else {
+          setnet4satsDetails(response);
+        }
+
+        setLoading(false);
+      };
+
+      fetch();
+
+      // cleanup on unmount
+      return () => {
+        if (retryIntervalRef.current) {
+          clearInterval(retryIntervalRef.current);
+        }
+      };
+    }
+  }, [ready]);
+
+  // set up retry mechanism when there's an error
+  useEffect(() => {
+    // only set up retry if there's an error and no existing retry interval
+    if (!error || net4satsDetails || retryIntervalRef.current) {
+      return;
+    }
+
+    console.log('setting up retry interval for net4sats details');
+    setRetrying(true);
+
+    // set up the retry interval
+    retryIntervalRef.current = setInterval(async () => {
+      console.log('retrying to fetch net4sats details...');
+      const response = await fetchnet4satsData(t);
+
+      // if successful, clear the interval
+      if (response.status) {
+        clearInterval(retryIntervalRef.current);
+        retryIntervalRef.current = null;
+        setnet4satsDetails(response);
+        setRetrying(false);
+        setError(false);
+      }
+    }, 5000);
+
+    // cleanup function
+    return () => {
+      if (retryIntervalRef.current) {
+        clearInterval(retryIntervalRef.current);
+        retryIntervalRef.current = null;
+      }
+    };
+  }, [error, net4satsDetails]);
+
+  // main render
+  return (
+    <div id="net4sats-captive-portal" className="net4sats-captive-portal">
+      <Background />
+
+      <div className="net4sats-captive-portal-interface">
+        <Header />
+
+        <div className="net4sats-captive-portal-content">
+          <div className="net4sats-captive-portal-content-container">
+
+            <div className="net4sats-captive-portal-tabs" aria-label={t('tab_aria_label')}>
+              <Tab type="cashu" method={method} setMethod={setMethod} />
+              <Tab type="balance" method={method} setMethod={setMethod} />
+              <Tab type="lightning" method={method} setMethod={setMethod} />
+            </div>
+
+            <div className="net4sats-captive-portal-view">
+              {loading && <Loading />}
+
+              {!loading && error && <div className="net4sats-captive-portal-error">
+                <Error label={error.label} code={error.code} message={error.message} />
+              </div>}
+
+              {/* show cashu, lightning, or the balance page based on selection */}
+              {!loading && !error && method === 'cashu' && <Cashu net4satsDetails={net4satsDetails.value} />}
+              {!loading && !error && method === 'lightning' && <Lightning net4satsDetails={net4satsDetails.value} />}
+              {!loading && !error && method === 'balance' && <BalancePage net4satsDetails={net4satsDetails.value} onNavigate={setMethod} />}
+            </div>
+
+          </div>
+        </div>
+
+        <Footer />
+      </div>
+
+    </div>
+  );
+}
+
+// header component showing net4sats logo above container
+export const Header = () => {
+  const { t } = useTranslation();
+
+  return <div className="net4sats-captive-portal-header">
+    <img src={logoWhite} alt={t('header_image_alt')}></img>
+  </div>
+}
+
+// tab component for the container header
+const Tab = ({ type, method, setMethod }) => {
+  const { t } = useTranslation();
+  const isLightning = type === 'lightning';
+  const isDisabled = isLightning; // Lightning is disabled
+
+  return <button
+    onClick={() => !isDisabled && setMethod(type)}
+    data-active={method === type}
+    data-disabled={isDisabled}
+    className={`net4sats-captive-portal-tabs-tab net4sats-captive-portal-tabs-tab-${type} ellipsis ${isDisabled ? 'disabled' : ''}`}
+    label={t(`${type}_tab`)}
+    id={`tab-${type}`}
+    aria-controls={`tab-${type}`}
+    disabled={isDisabled}>
+    {isLightning ? `${t(`${type}_tab`)} (Coming Soon)` : t(`${type}_tab`)}
+  </button>
+}
+
+// loading component shows a spinner
+export const Loading = () => {
+  const { t } = useTranslation();
+
+  return <div className="net4sats-captive-portal-loading">
+    <span className="spinner big"></span>
+    {t('loading')}
+  </div>
+}
+
+// processing component shows a spinner
+export const Processing = ({ label }) => {
+  const { t } = useTranslation();
+
+  if (!label || "string" !== typeof label || !label.length) label = t('processing')
+
+  return <div className="net4sats-captive-portal-processing">
+    <span className="spinner big"></span>
+    {label}
+  </div>
+}
+
+// shows access granted message if payment succeeded
+export const AccessGranted = ({ allocation }) => {
+  const { t } = useTranslation();
+  const [authCompleted, setAuthCompleted] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
+
+  // Auto-submit the auth form via fetch to complete captive portal authentication.
+  // Using fetch instead of form.submit() intercepts the redirect to '/' so the
+  // portal UI stays visible — the user is not kicked out and can view their balance.
+  // Internet access was already granted by the payment POST in submitToken(); this
+  // GET request finalises the captive portal detection flow without navigating away.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetch('/', { method: 'GET' })
+        .then(() => setAuthCompleted(true))
+        .catch(() => setAuthCompleted(true)); // proceed regardless — auth already granted
+    }, 900);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Session-expiry heartbeat.
+  //
+  // NoDogSplash deauthenticates clients when their purchased time/data limit is
+  // reached. At that point the client loses internet access, but the portal page
+  // (if still open) gives no feedback — the user sees mysterious connection errors.
+  //
+  // We poll the /usage endpoint (always reachable on port 2121 even for
+  // unauthenticated clients). It returns "used/total" while the session is
+  // active, and "-1/-1" when the session has expired. After 2 consecutive
+  // failures we show a SessionExpired view telling the user to reconnect.
+  useEffect(() => {
+    if (!authCompleted) return;
+
+    let failures = 0;
+    let cancelled = false;
+
+    const heartbeat = setInterval(async () => {
+      if (cancelled) return;
+      try {
+        const resp = await fetch(`${getnet4satsBaseUrl()}/usage`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const text = await resp.text();
+        if (text.includes('-1/-1')) {
+          throw new Error('session not found');
+        }
+        failures = 0;
+      } catch {
+        failures++;
+        if (failures >= 2) {
+          setSessionExpired(true);
+          clearInterval(heartbeat);
+        }
+      }
+    }, 30000); // check every 30s
+
+    return () => {
+      cancelled = true;
+      clearInterval(heartbeat);
+    };
+  }, [authCompleted]);
+
+  if (sessionExpired) {
+    return <SessionExpired />;
+  }
+
+  // build the persistent portal balance URL from the gateway host
+  const balanceUrl = `${getnet4satsBaseUrl()}/portal`;
+
+  return <div className="net4sats-captive-portal-access-granted">
+    <div className="net4sats-captive-portal-access-granted-checkmark">
+      <AccessGrantedIcon />
+    </div>
+    <div className="net4sats-captive-portal-access-granted-label">
+      <h2>{t('access_granted_title')}</h2>
+      <p dangerouslySetInnerHTML={{ __html: t('access_granted_subtitle', { purchased: `<strong>${allocation}</strong>` }) }}></p>
+
+      {/* show the access duration the user purchased */}
+      <div className="net4sats-captive-portal-access-granted-duration">
+        <span className="net4sats-captive-portal-access-granted-duration-label">
+          {t('access_duration_label')}
+        </span>
+        <span className="net4sats-captive-portal-access-granted-duration-value">
+          {allocation}
+        </span>
+      </div>
+
+      {/* link to the persistent balance page so the user can return later */}
+      <a
+        href={balanceUrl}
+        target="_blank"
+        rel="noreferrer"
+        className="cta net4sats-captive-portal-access-granted-balance-link"
+      >
+        {t('view_balance')}
+      </a>
+      <p className="small">{t('balance_link_hint')}</p>
+    </div>
+  </div>
+}
+
+// shown when the heartbeat detects the session has expired
+const SessionExpired = () => {
+  const { t } = useTranslation();
+  return <div className="net4sats-captive-portal-access-granted">
+    <div className="net4sats-captive-portal-access-granted-checkmark">
+      <ErrorIcon />
+    </div>
+    <div className="net4sats-captive-portal-access-granted-label">
+      <h2>{t('session_expired_title')}</h2>
+      <p>{t('session_expired_message')}</p>
+      <p className="small">{t('session_expired_hint')}</p>
+      <button className="cta" onClick={() => window.location.reload()}>
+        {t('session_expired_reconnect')}
+      </button>
+    </div>
+  </div>
+}
+
+// footer component below container
+export const Footer = () => {
+  return <div className="net4sats-captive-portal-footer">
+    <p><Trans i18nKey="powered_by" components={{ 1: <a href="https://net4sats.com/" target="_blank" rel="noreferrer"></a> }} /></p>
+  </div>
+}
+
+// mint access options component
+export const AccessOptions = ({ pricingInfo, selectedMint, setSelectedMint }) => {
+  const { t } = useTranslation();
+  return <>
+    {/* render a button for each available mint option */}
+    {pricingInfo.length && pricingInfo.map(mint => {
+      if (!mint.price || !mint.url) return null;
+      let mintAddressStripped = mint.url.replace('https://', '');
+      mintAddressStripped = mintAddressStripped.replace('http://', '');
+
+      const stepSizeInfo = getStepSizeValues(mint, t);
+      const formattedStepSize = stepSizeInfo ? `${stepSizeInfo.value} ${stepSizeInfo.unit}` : "[step_size_formatted]";
+      const pricePerStep = mint.price / (mint.min_steps || 1);
+      let mintPriceFormatted = `${pricePerStep.toFixed((pricePerStep % 1 !== 0) ? 2 : 0)} ${mint.unit} / ${formattedStepSize}`;
+
+      return <button
+        key={mintAddressStripped}
+        className={classNames('ghost', 'ellipsis', { 'cta active': mint.url === selectedMint.url })}
+        onClick={() => {
+          setSelectedMint(mint);
+        }}>
+        <span className="mint-price ellipsis">
+          <RadioButtonIcon />
+          {mint.price} {mint.unit}
+        </span>
+        <span className="mint-meta">
+          <span className="mint-meta-address">{mintAddressStripped}</span>
+          <span className="mint-meta-price-per-step">{mintPriceFormatted}</span>
+        </span>
+      </button>
+    })}
+  </>
+}
+
+export default App
