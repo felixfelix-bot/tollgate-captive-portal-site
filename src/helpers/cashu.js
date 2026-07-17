@@ -197,8 +197,50 @@ export const submitToken = async (token, net4satsDetails, allocation, i18n) => {
     });
 
     if (!response.ok) {
-      if (response.status === 402) {
-        // payment required: token was not accepted
+      // Parse the error response body — backend returns a kind 21023 nostr event
+      // with tags containing the error code and content containing the message.
+      let backendCode = null;
+      let backendMessage = null;
+      try {
+        const errorBody = await response.clone().json();
+        if (errorBody && errorBody.kind === 21023) {
+          // Extract error code from tags: ["code", "payment-error-xxx"]
+          if (errorBody.tags && Array.isArray(errorBody.tags)) {
+            for (const tag of errorBody.tags) {
+              if (Array.isArray(tag) && tag[0] === "code" && tag[1]) {
+                backendCode = tag[1];
+                break;
+              }
+            }
+          }
+          // Use content for the error message
+          if (errorBody.content && typeof errorBody.content === "string") {
+            backendMessage = errorBody.content;
+          }
+        }
+      } catch (e) {
+        console.error("failed to parse error response body:", e);
+      }
+
+      if (backendCode === "payment-error-dleq-keyset-rotation") {
+        console.error("DLEQ keyset rotation error:", response);
+        return {
+          status: 0,
+          code: "CU109",
+          label: i18n("CU109_label"),
+          message: i18n("CU109_message"),
+        };
+      } else if (backendMessage) {
+        // Use the actual backend error message instead of generic CU106
+        console.error("backend error:", backendCode, backendMessage);
+        return {
+          status: 0,
+          code: "CU106",
+          label: i18n("CU106_label"),
+          message: backendMessage,
+        };
+      } else if (response.status === 402) {
+        // payment required: token was not accepted (fallback if body wasn't parseable)
         console.error("error processing token:", response);
         return {
           status: 0,
