@@ -1,12 +1,15 @@
 #!/bin/sh
 # hotdeploy-admin-8090.sh — repair :8090 on an OpenWrt router and deploy the
-# current TollGate admin (config) board.
+# current TollGate admin (config) board over HTTPS.
 #
 # Why: on the older scheme uhttpd.admin.home=/www, so uhttpd's default
 # cgi_prefix (/cgi-bin) resolves :8090/cgi-bin/luci to the REAL LuCI CGI — :8090
-# then serves LuCI instead of the TollGate config board. This sets the brand
-# webroot (/www/tollgate), removes LuCI reachability, keeps :8090 exclusive to
-# the admin instance, and installs the TollGate-branded board.
+# then serves LuCI instead of the TollGate config board. Additionally the board
+# is served over plain http, so browsers flag its password fields (login / WiFi /
+# Settings) as insecure and password managers refuse to autofill. This sets the
+# brand webroot (/www/tollgate), makes the instance HTTPS-only on :8090 (reusing
+# the router's self-signed cert), keeps :8090 exclusive, and installs the
+# TollGate-branded board.
 #
 # TollGate brand. Idempotent. LuCI stays on :8080.
 #
@@ -18,13 +21,16 @@ ASSET_URL="https://github.com/felixfelix-bot/tollgate-captive-portal-site/releas
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-echo "== TollGate admin :8090 hot-deploy =="
+echo "== TollGate admin :8090 hot-deploy (HTTPS) =="
 
-echo "[1/4] configuring uhttpd.admin (webroot ${ADMIN_HOME}; no LuCI on :8090)"
+echo "[1/4] configuring uhttpd.admin (webroot ${ADMIN_HOME}; HTTPS-only; no LuCI on :8090)"
 uci -q get uhttpd.admin >/dev/null 2>&1 || uci set uhttpd.admin=uhttpd || die "uci set uhttpd.admin"
 uci -q delete uhttpd.admin.listen_http
-uci add_list uhttpd.admin.listen_http='0.0.0.0:8090'
-uci add_list uhttpd.admin.listen_http='[::]:8090'
+uci -q delete uhttpd.admin.listen_https
+uci add_list uhttpd.admin.listen_https='0.0.0.0:8090'
+uci add_list uhttpd.admin.listen_https='[::]:8090'
+[ -f /etc/uhttpd.crt ] && uci set uhttpd.admin.cert='/etc/uhttpd.crt'
+[ -f /etc/uhttpd.key ] && uci set uhttpd.admin.key='/etc/uhttpd.key'
 uci set uhttpd.admin.ubus_prefix='/ubus'
 uci set uhttpd.admin.script_timeout='60'
 uci set uhttpd.admin.network_timeout='30'
@@ -41,6 +47,8 @@ for sec in $(uci show uhttpd 2>/dev/null | sed -n 's/^uhttpd\.\([^.]*\)=uhttpd$/
     if [ "$sec" != "admin" ]; then
         uci -q del_list "uhttpd.$sec.listen_http=0.0.0.0:8090"
         uci -q del_list "uhttpd.$sec.listen_http=[::]:8090"
+        uci -q del_list "uhttpd.$sec.listen_https=0.0.0.0:8090"
+        uci -q del_list "uhttpd.$sec.listen_https=[::]:8090"
     fi
 done
 uci commit uhttpd || die "uci commit uhttpd"
@@ -67,16 +75,17 @@ echo "[3/4] restarting rpcd + uhttpd"
 /etc/init.d/rpcd restart 2>/dev/null || true
 /etc/init.d/uhttpd restart || die "uhttpd restart"
 
-echo "[4/4] verifying"
+echo "[4/4] verifying (https)"
 sleep 1
 get() {
-    if command -v curl >/dev/null 2>&1; then curl -fsS "$1" 2>/dev/null
-    else uclient-fetch -q -O - "$1" 2>/dev/null
+    if command -v curl >/dev/null 2>&1; then curl -fsSk "$1" 2>/dev/null
+    else uclient-fetch -q -O - --no-check-certificate "$1" 2>/dev/null
     fi
 }
 title() { get "$1" | sed -n 's/.*<title>\([^<]*\)<\/title>.*/\1/p' | head -1; }
-echo "  :8090/              -> $(title "http://127.0.0.1:8090/" || true)"
-echo "  :8090/cgi-bin/luci  -> $(title "http://127.0.0.1:8090/cgi-bin/luci" || true)"
+echo "  https://:8090/              -> $(title "https://127.0.0.1:8090/" || true)"
+echo "  https://:8090/cgi-bin/luci  -> $(title "https://127.0.0.1:8090/cgi-bin/luci" || true)"
 echo
-echo "OK. Open http://<router-lan-ip>:8090/  (login root / router password)."
-echo "LuCI stays on :8080. Backup of the previous webroot: /tmp/www-tollgate-before-${TS}.tgz"
+echo "OK. Open https://<router-lan-ip>:8090/  (login root / router password)."
+echo "Accept the self-signed certificate once. LuCI stays on :8080."
+echo "Backup of the previous webroot: /tmp/www-tollgate-before-${TS}.tgz"
