@@ -18,7 +18,11 @@
 # redirect_https; it is a separate uhttpd.admin section).
 #
 # Usage:  bash revert-luci-8080.sh [ROUTER_IP]        (default 192.168.1.1)
-# Runs the uci command over ssh as root. Prompts for the router root password.
+#
+# IMPORTANT for curl|bash: this reads the password from /dev/tty, never from
+# stdin. When run as `curl ... | bash`, the script's stdin is the curl pipe,
+# not your terminal — reading there yields EOF and an empty password. We
+# deliberately bypass that by reading the controlling terminal directly.
 set -euo pipefail
 
 IP="${1:-192.168.1.1}"
@@ -26,34 +30,35 @@ IP="${1:-192.168.1.1}"
 echo "Reverting LuCI HTTP->HTTPS redirect on uhttpd.main @ $IP"
 echo "(fixes pre13 'can't log in at all anymore' when TLS :443 is not serving)"
 
-# Determine ssh tooling
+# Locate the controlling terminal so password prompt works under curl|bash.
+TTY="${TTY:-/dev/tty}"
+
 if command -v sshpass >/dev/null 2>&1; then
-  echo -n "Enter router root password: " >&2
-  read -r -s PW; echo >&2
-  SSHPASS="$PW" sshpass -e ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$IP"
-else
-  echo "sshpass not installed. Open an interactive ssh session — the script will" >&2
-  echo "run the revert in it. Run: ssh root@$IP , then paste the block below:" >&2
+  read -r -s -p "Enter router root password: " PW < "$TTY" 2>&1 || {
+    echo "Could not read from $TTY — run interactively: ssh root@$IP" >&2
+    exit 1
+  }
+  echo >&2
+  REMOTE_CMD='uci set uhttpd.main.redirect_https="0"; uci commit uhttpd; /etc/init.d/uhttpd restart; uci get uhttpd.main.redirect_https'
+  echo "Running on router: $REMOTE_CMD"
+  # -tt forces a TTY so sshpass can hand the password to ssh's askpass over a
+  # real controlling terminal (avoids "no pseudo-terminal allocated").
+  SSHPASS="$PW" sshpass -e ssh -tt -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$IP" "$REMOTE_CMD"
   echo
+  echo "Verify: redirect_https is now '0'. LuCI login:  http://$IP:8080/"
+  echo "Admin board (pre13 bundle) is unaffected on :8090."
+else
+  echo "sshpass not installed. Run these three commands in an interactive ssh session:" >&2
+  echo >&2
+  echo "  ssh root@$IP" >&2
+  echo >&2
   cat <<'EOSH'
 uci set uhttpd.main.redirect_https='0'
 uci commit uhttpd
 /etc/init.d/uhttpd restart
-echo "LuCI redirect reverted. Try http://<router>:8080/"
+uci get uhttpd.main.redirect_https
 EOSH
-  echo
-  echo "(Tip: apt install sshpass to run non-interactively next time.)"
+  echo >&2
+  echo "(Tip: apt install sshpass to use this script non-interactively.)" >&2
   exit 0
 fi
-
-REMOTE_CMD='uci set uhttpd.main.redirect_https="0"; uci commit uhttpd; /etc/init.d/uhttpd restart; uci get uhttpd.main.redirect_https'
-echo "Running on router: $REMOTE_CMD"
-SSHPASS="$PW" sshpass -e ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$IP" "$REMOTE_CMD"
-
-echo
-echo "Verify: redirect_https is now '0'. LuCI login:  http://$IP:8080/"
-echo "Admin board (pre13 bundle) is unaffected on :8090."
-echo
-echo "If you'd rather keep HTTPS-on-LuCI, the real fix is ensuring a bound"
-echo "TLS listener: add /etc/uhttpd.crt + /etc/uhttpd.key that uhttpd can"
-echo "actually start on :443, then set redirect_https=1."
