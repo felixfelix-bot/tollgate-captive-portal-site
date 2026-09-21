@@ -157,7 +157,7 @@ export const Cashu = (props) => {
         {(!success && processing) && <Processing label={t('processing_payment')} />}
 
         {/* accessgranted: shows a success message and the amount of access granted after a successful payment */}
-        {(success && !processing) && <AccessGranted allocation={`${allocation.value} ${allocation.unit}`} />}
+        {(success && !processing && allocation) && <AccessGranted allocation={`${allocation.value} ${allocation.unit}`} />}
 
         {/* tokeninput: input field and actions for entering or scanning a cashu token */}
         {(!success && !processing && accessOptions.length > 0) && <TokenInput token={token} setToken={setToken} scanning={scanning} setScanning={setScanning} setError={setError} />}
@@ -189,8 +189,8 @@ export const Cashu = (props) => {
 
         {/* purchase button: only enabled if token is valid and no error */}
         {!success && !processing && <div className="tollgate-captive-portal-method-submit">
-          {(!tokenValue || error) && <button disabled>{t('purchase')}</button>}
-          {(tokenValue && !processing && !error) && (() => {
+          {(!tokenValue || !allocation || error) && <button disabled>{t('purchase')}</button>}
+          {(tokenValue && allocation && !processing && !error) && (() => {
             return <button
               className="cta"
               dangerouslySetInnerHTML={{
