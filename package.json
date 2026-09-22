@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "vite build && npm run rename-html",
     "preview": "vite preview",
+    "test": "vitest run",
     "rename-html": "node -e \"const fs = require('fs'); const path = require('path'); const buildDir = path.join(__dirname, 'build'); const indexHtml = path.join(buildDir, 'index.html'); const splashHtml = path.join(buildDir, 'splash.html'); const manifestPath = path.join(buildDir, 'asset-manifest.json'); fs.renameSync(indexHtml, splashHtml); if (fs.existsSync(manifestPath)) { const manifest = fs.readFileSync(manifestPath, 'utf8').replace(/index\\.html/g, 'splash.html'); fs.writeFileSync(manifestPath, manifest); }\""
   },
   "dependencies": {
@@ -25,8 +26,10 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.6.0",
+    "jsdom": "^30.1.1",
+    "sass": "^1.89.2",
     "vite": "^7.0.0",
-    "sass": "^1.89.2"
+    "vitest": "^3.2.7"
   },
   "eslintConfig": {
     "extends": [
