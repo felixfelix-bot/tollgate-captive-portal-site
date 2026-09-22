@@ -7,7 +7,10 @@
     "build": "vite build && npm run rename-html",
     "preview": "vite preview",
     "test": "vitest run",
-    "rename-html": "node -e \"const fs = require('fs'); const path = require('path'); const buildDir = path.join(__dirname, 'build'); const indexHtml = path.join(buildDir, 'index.html'); const splashHtml = path.join(buildDir, 'splash.html'); const manifestPath = path.join(buildDir, 'asset-manifest.json'); fs.renameSync(indexHtml, splashHtml); if (fs.existsSync(manifestPath)) { const manifest = fs.readFileSync(manifestPath, 'utf8').replace(/index\\.html/g, 'splash.html'); fs.writeFileSync(manifestPath, manifest); }\""
+    "rename-html": "node -e \"const fs = require('fs'); const path = require('path'); const buildDir = path.join(__dirname, 'build'); const indexHtml = path.join(buildDir, 'index.html'); const splashHtml = path.join(buildDir, 'splash.html'); const manifestPath = path.join(buildDir, 'asset-manifest.json'); fs.renameSync(indexHtml, splashHtml); if (fs.existsSync(manifestPath)) { const manifest = fs.readFileSync(manifestPath, 'utf8').replace(/index\\.html/g, 'splash.html'); fs.writeFileSync(manifestPath, manifest); }\"",
+    "build:branded": "bash scripts/build-net4sats-portal.sh",
+    "check:overlay": "node scripts/check-overlay-descriptor.mjs",
+    "verify:branded": "node scripts/verify-branded-build.mjs dist-net4sats"
   },
   "dependencies": {
     "@cashu/cashu-ts": "^2.2.2",

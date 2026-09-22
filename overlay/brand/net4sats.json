@@ -1,0 +1,12 @@
+{
+  "id": "net4sats",
+  "name": "net4sats",
+  "domain": "net4sats.lan",
+  "tagline": "Router Admin Dashboard",
+  "poweredBy": "Powered by net4sats",
+  "website": "https://net4sats.com/",
+  "version": "net4sats v0.6.0",
+  "themeColor": "#f7931a",
+  "sessionKey": "net4sats_session",
+  "sessionUser": "net4sats_user"
+}
