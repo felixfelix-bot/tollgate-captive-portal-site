@@ -313,7 +313,7 @@ export const AccessOptions = ({ pricingInfo, selectedMint, setSelectedMint }) =>
   const { t } = useTranslation();
   return <>
     {/* render a button for each available mint option */}
-    {pricingInfo.length && pricingInfo.map(mint => {
+    {pricingInfo.length > 0 && pricingInfo.map(mint => {
       if (!mint.price || !mint.url) return null;
       let mintAddressStripped = mint.url.replace('https://', '');
       mintAddressStripped = mintAddressStripped.replace('http://', '');
