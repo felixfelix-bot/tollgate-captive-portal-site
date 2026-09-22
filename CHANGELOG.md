@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Removed
+- **The in-tree duplicate brand identity:** `src/assets/logo/` (7 rasters) is gone and
+  `src/App.jsx` imports the logo from `overlay/assets/` instead, so identity has exactly
+  one home. `public/manifest.json` is no longer hand-written: `scripts/gen-manifest.mjs`
+  derives it from the descriptor (name, short_name, theme_color) and `npm run build`
+  regenerates it, pinned by `tests/unit/single-source-brand.test.js` (5 tests).
+
 ### Added
 - **Brand overlay:** `overlay/` brand descriptor + logo/icon slot and
   `scripts/build-net4sats-portal.sh`, which builds the branded admin UI from the

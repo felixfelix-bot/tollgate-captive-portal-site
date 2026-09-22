@@ -1,6 +1,6 @@
 {
-  "short_name": "net4sats Portal",
-  "name": "net4sats Captive Portal",
+  "short_name": "net4sats",
+  "name": "net4sats",
   "icons": [
     {
       "src": "favicon.ico",

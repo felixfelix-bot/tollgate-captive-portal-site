@@ -18,7 +18,7 @@ import { fetchnet4satsData, getStepSizeValues, getnet4satsBaseUrl } from './help
 import './App.scss'
 
 // import the net4sats logos
-import logoWhite from './assets/logo/net4sats-logo-white.png';
+import logoWhite from '../overlay/assets/logo-white.png';
 
 // main component
 export const App = () => {
