@@ -37,8 +37,15 @@ export default defineConfig({
   // self-contained instead of silently failing with ERR_CONNECTION_REFUSED when
   // nobody started `npm run dev` first. reuseExistingServer keeps the CI job
   // (which launches `npm run dev &` itself) working unchanged.
+  //
+  // `--port ${PORT}` is not cosmetic: without it the server always binds 5173, so
+  // PORTAL_TEST_PORT only moved the URL the suite asserted on and any stale dev
+  // server already sitting on 5173 was reused instead of this checkout's tree —
+  // a run then tested someone else's working copy and failed with an export error
+  // that had nothing to do with the commit under test (measured on this fleet:
+  // several checkouts run in parallel, each with its own dev server).
   webServer: {
-    command: 'npm run dev',
+    command: `npm run dev -- --port ${PORT}`,
     url: `http://localhost:${PORT}`,
     reuseExistingServer: true,
     timeout: 60000,
