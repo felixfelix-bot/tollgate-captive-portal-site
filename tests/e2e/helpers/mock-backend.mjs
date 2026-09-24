@@ -28,6 +28,56 @@ export const validateToken = (token, mint, i18n) => {
 };
 export const submitToken = async () => ({ status: 1, label: 'ok', message: 'ok' });
 export const extractProofsFromToken = () => [];
+
+// --- the rest of the module's export surface -------------------------------
+//
+// The stub replaces src/helpers/cashu.js, and src/components/Cashu.jsx imports
+// { validateToken, submitToken, canSubmitAnyway, mintUrlFromToken, findMintOption }
+// from it. A stub that exports only the mint-touching half does not merely skip
+// those code paths — the ES module link fails, the app never hydrates, and the
+// lane can never run at all (measured: "The requested module
+// '/src/helpers/cashu.js' does not provide an export named …"). So every name
+// the module under test imports must be exported here.
+//
+// canSubmitAnyway and findMintOption are copied VERBATIM from the real helper:
+// they are pure, and a stub that drifted from the real gating would pin the wrong
+// behaviour. If the real helper changes, change these with it.
+export const canSubmitAnyway = (validation) =>
+  !!validation && validation.status !== 1 && validation.code === "CU102";
+
+export const normalizeMintUrl = (url) => {
+  if ("string" !== typeof url) return null;
+
+  let value = url.trim().toLowerCase();
+  if (!value) return null;
+
+  const scheme = value.startsWith("http://") ? "http" : "https";
+  value = value.replace(scheme === "http" ? /:80(?=\\/|$)/ : /:443(?=\\/|$)/, "");
+  value = value.replace(/^https?:\\/\\//, "");
+  value = value.replace(/[?#].*$/, "");
+  value = value.replace(/\\/+$/, "");
+
+  return value.length ? value : null;
+};
+
+export const findMintOption = (mintUrl, options) => {
+  const wanted = normalizeMintUrl(mintUrl);
+  if (!wanted || !Array.isArray(options)) return null;
+
+  return options.find((option) => normalizeMintUrl(option?.url) === wanted) || null;
+};
+
+// NOT mirrored: the real mintUrlFromToken decodes the note with cashu-ts
+// (getTokenMetadata primary, getDecodedToken fallback) to learn which mint
+// issued it. The stub exists to keep the cashu-ts decoders OUT of this lane, so
+// it answers null — the documented "mint unknowable" answer the real helper
+// uses for garbage and ambiguous notes, and a shape Cashu.jsx already handles
+// (it asks the user / falls back to the advertised list). Consequence, stated
+// plainly: this lane does NOT exercise mint auto-selection from a pasted note;
+// that decode path is covered by tests/unit/cashu-validateToken.test.js.
+// Replacing the module stub with real network-level stubbing (so the real
+// decoder runs here too) is the open half of REGRESSION-A.
+export const mintUrlFromToken = () => null;
 `;
 
 export const TEST_TOKEN = 'cashuBtest123MockTokenForE2E';

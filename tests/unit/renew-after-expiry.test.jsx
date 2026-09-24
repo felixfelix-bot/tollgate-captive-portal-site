@@ -37,6 +37,15 @@ vi.mock('react-i18next', () => {
 // The payment helpers need a real Cashu mint + a real token; the repo's own e2e
 // suite stubs them the same way (tests/e2e/helpers/mock-backend.mjs) so the
 // expiry/renewal flow can be driven without a mint.
+//
+// The mock must export EVERY name Cashu.jsx imports. A mock that lags the real
+// module's surface does not merely leave those paths untested — the import fails
+// and every assertion in this file dies with "No mintUrlFromToken export is
+// defined on the … mock" (measured: 5 failures in this file on main, 2026-09-24).
+// mintUrlFromToken/findMintOption are not exercised by this suite: this suite
+// drives the expiry/renewal flow, so they answer null, which is the real
+// helper's documented "mint unknowable / not advertised" answer. The real decode
+// path is covered by tests/unit/cashu-validateToken.test.js.
 vi.mock('../../src/helpers/cashu.js', () => ({
   validateToken: (token) => (
     token && token.startsWith('cashu')
@@ -46,6 +55,8 @@ vi.mock('../../src/helpers/cashu.js', () => ({
   submitToken: async () => ({ status: 1, label: 'ok', message: 'ok' }),
   canSubmitAnyway: () => false,
   extractProofsFromToken: () => [],
+  mintUrlFromToken: () => null,
+  findMintOption: () => null,
 }));
 
 // no network: the mint's swap fee is skipped, exactly as in production when the
