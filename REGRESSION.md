@@ -20,14 +20,17 @@ That is the whole portal regression surface, in one command with one exit
 status, and it is machine-readable:
 
 ```
-LANE unit PASS Tests 96 passed (see /var/tmp/tg-portal-regression.12345/unit.log)
+LANE unit PASS Tests 107 passed (see /var/tmp/tg-portal-regression.3960658/unit.log)
 LANE build PASS production bundle built from this commit
 LANE packaging PASS no foreign skins, no company-branding references
-LANE e2e PASS 15 passed (port 5341) (see /var/tmp/tg-portal-regression.12345/e2e.log)
-LANEINFO visual: 6 passed — a screenshot diff needs a human to judge it
+LANE e2e PASS 11 passed (2.1m) (port 5358) (see /var/tmp/tg-portal-regression.3960658/e2e.log)
+LANEINFO visual: 2 passed — a screenshot diff needs a human to judge it
 LANES total=4 pass=4 fail=0 skip=0
-LANEEVIDENCE /var/tmp/tg-portal-regression.12345
+LANEEVIDENCE /var/tmp/tg-portal-regression.3960658
 ```
+
+Those numbers are the captured run on this branch (2026-09-24, exit 0); the work
+dir and the e2e port are per-run and will differ.
 
 Individual lanes: `make regression-unit`, `make regression-build`,
 `make regression-e2e`, `make regression-visual`. `scripts/regression.sh` is the
