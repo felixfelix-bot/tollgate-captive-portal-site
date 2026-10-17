@@ -1,16 +1,24 @@
 // helpers/balance.js
 //
-// Thin "internet balance" layer for the captive portal.
+// "Internet balance" helpers for the captive portal.
 //
-// IMPORTANT: this does NOT fabricate a balance backend. A user's "internet
-// balance" is the time/bytes a given Cashu token grants against the selected
-// mint, computed with the SAME validation + allocation helpers the purchase
-// flow uses. This keeps the balance page truthful — it only ever reports
-// values derived from a real token and the tollgate's real pricing event.
+// Two different balance sources live here on purpose:
+//
+//   1. TOKEN balance (getInternetBalance / formatBalance) — what a given Cashu
+//      token *would* grant against the selected mint. Computed with the SAME
+//      validation + allocation helpers the purchase flow uses, so it never
+//      fabricates a number.
+//
+//   2. SESSION balance (fetchBalanceData / formatMetricValue / estimateSatsSpent)
+//      — the tollgate's own view of the CURRENT session, served by the backend
+//      on port 2121:
+//        GET /balance -> JSON { status, session_active, metric, usage,
+//                               allotment, remaining, start_time, mac }
+//      `metric` is the merchant's unit: "milliseconds" or "bytes".
 
 // helpers (real implementations)
 import { validateToken } from './cashu';
-import { calculateAllocation } from './tollgate';
+import { calculateAllocation, getTollgateBaseUrl } from './tollgate';
 
 // Compute the internet balance a Cashu token represents for a given mint.
 //
@@ -46,10 +54,14 @@ export const formatBalance = (allocation) => {
   return `${allocation.value} ${allocation.unit}`;
 };
 
-export const fetchBalanceData = async (i18n) => {
+// Fetch the current session's balance from the tollgate backend.
+// Returns { status: 1, value: <balanceResponse> } or { status: 0, ... }.
+export const fetchBalanceData = async () => {
   try {
-    const resp = await fetch('/balance');
-    if (!resp.ok) return { status: 0, code: 'network', message: 'Balance unavailable' };
+    const resp = await fetch(`${getTollgateBaseUrl()}/balance`);
+    if (!resp.ok) {
+      return { status: 0, code: 'network', message: 'Balance unavailable' };
+    }
     const data = await resp.json();
     return { status: 1, value: data };
   } catch {
@@ -57,18 +69,50 @@ export const fetchBalanceData = async (i18n) => {
   }
 };
 
+// Render a raw backend amount (milliseconds or bytes) as a compact, human
+// readable string. Unknown/non-numeric amounts render as an em dash rather
+// than a bogus number.
 export const formatMetricValue = (amount, metric) => {
-  if (!amount && amount !== 0) return '—';
+  if (amount == null || amount === '') return '—';
+
+  const value = Number(amount);
+  if (!Number.isFinite(value)) return '—';
+
   if (metric === 'bytes') {
-    if (amount >= 1073741824) return (amount / 1073741824).toFixed(1) + ' GB';
-    if (amount >= 1048576) return (amount / 1048576).toFixed(1) + ' MB';
-    if (amount >= 1024) return (amount / 1024).toFixed(0) + ' KB';
-    return amount + ' B';
+    if (value >= 1073741824) return `${(value / 1073741824).toFixed(1)} GB`;
+    if (value >= 1048576) return `${(value / 1048576).toFixed(1)} MB`;
+    if (value >= 1024) return `${(value / 1024).toFixed(0)} KB`;
+    return `${value} B`;
   }
-  const seconds = Math.floor(amount / 1000);
-  if (seconds >= 3600) return Math.floor(seconds / 3600) + 'h ' + Math.floor((seconds % 3600) / 60) + 'm';
-  if (seconds >= 60) return Math.floor(seconds / 60) + ' min';
-  return seconds + 's';
+
+  // anything that is not "bytes" is treated as time in milliseconds
+  const seconds = Math.floor(value / 1000);
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  if (seconds >= 60) return `${Math.floor(seconds / 60)} min`;
+  return `${seconds}s`;
+};
+
+// Estimate how many sats the used portion of the current session cost.
+//
+// /balance reports usage in the merchant's metric, never in sats, so this is
+// derived from the pricing event: one "step" costs `price / min_steps` sats.
+// Returns null (and the caller renders "—") when either the usage or the
+// pricing is missing — we never invent a number.
+export const estimateSatsSpent = (usage, accessOption) => {
+  if (usage == null) return null;
+  if (!accessOption) return null;
+
+  const used = Number(usage);
+  const stepSize = Number(accessOption.step_size);
+  const price = Number(accessOption.price);
+  const minSteps = Number(accessOption.min_steps) || 1;
+
+  if (!Number.isFinite(used) || !Number.isFinite(stepSize) || !Number.isFinite(price)) return null;
+  if (stepSize <= 0 || price <= 0) return null;
+
+  const steps = used / stepSize;
+  const sats = Math.round((steps * price) / minSteps);
+  return { sats, unit: accessOption.unit || 'sat' };
 };
 
 export const getMetricLabel = (metric, t) => {
