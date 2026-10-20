@@ -46,6 +46,11 @@ function generateAssetManifestPlugin() {
 
 export default defineConfig({
   base: process.env.VITE_BASE_PATH || '/',
+  define: {
+    // Guest brand slot: '' when unset, so the app falls back to the default logo
+    // and the unbranded bundle is unchanged.
+    'import.meta.env.VITE_BRAND': JSON.stringify(process.env.VITE_BRAND || ''),
+  },
   plugins: [react(), generateAssetManifestPlugin()],
   // The admin app (:5199) resolves `vite` out of the SAME node_modules symlink,
   // so by default both dev servers share `node_modules/.vite`. Whichever
