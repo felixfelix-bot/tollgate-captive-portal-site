@@ -35,7 +35,52 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
+      - name: Packaging guards (admin board credential fail-closed)
+        # A fresh router whose root /etc/shadow hash is UNSET accepts ANY
+        # password through rpcd's session.login. These two gates keep the
+        # surface shut: the uci-defaults must not serve :8090/:8443 in that
+        # state, and the rpcd plugin must refuse every method that acts on the
+        # router (exposing only the pre-auth auth_status probe).
+        #
+        # They run FIRST, before the vitest suite: pure POSIX sh, no network, no
+        # root, ~1s each, and they must not be masked by an unrelated failure in
+        # a suite they are not part of (the vitest run is currently red on main
+        # for a heap OOM in the full-suite process).
+        run: |
+          sh packaging/tests/test-92-admin-credential-guard.sh
+          sh packaging/tests/test-rpcd-tollgate-credential-guard.sh
+      - name: Packaging guard (LuCI redirect derived from a covering certificate)
+        # uhttpd.main.redirect_https is a DERIVED value written by TWO scripts —
+        # this repo's 92-tollgate-admin-setup and the module's 99-tollgate-setup —
+        # and last-writer-wins differs by install path (postinst: 90, 99, 92;
+        # numeric uci-defaults at boot: 90, 92, 99). They only agree if they
+        # evaluate the same rule, so:
+        #   * test-92-luci-redirect-guard.sh runs the shipped 92 block with a
+        #     stubbed uci + CLI: a non-covering identity must repair a stale
+        #     redirect to 0, an unusable CLI must fail closed, and the block must
+        #     not decide from the image's placeholder path (the pre17 bench
+        #     certificate error).
+        #   * test-redirect-https-single-rule.sh reads BOTH writers (the module's
+        #     is fetched if no checkout is given) and fails if either carries a
+        #     premise of its own instead of the shared `tollgate ssl covers` check.
+        run: |
+          sh packaging/tests/test-92-luci-redirect-guard.sh
+          sh packaging/tests/test-redirect-https-single-rule.sh
+      - name: Packaging guard (admin board TLS identity + derived redirect)
+        # The :8090 board was the last surface still pinned to the OpenWrt
+        # image's placeholder certificate (/etc/uhttpd.crt, CN=OpenWrt) and it
+        # never redirected its own plain-HTTP port. This guard runs the shipped
+        # blocks with a stubbed uci + CLI and pins the rule: the board's :8443
+        # listener carries the identity the MODULE provisioned
+        # (/etc/tollgate/ssl/server.{crt,key}), the image's pair is only a
+        # fallback LISTENER identity, and uhttpd.admin.redirect_https is derived
+        # from the SAME coverage predicate as the LuCI hop — armed only when the
+        # identity covers this router, explicit in both directions, and dropped
+        # again (fail open) when :8443 never came up.
+        run: sh packaging/tests/test-92-admin-board-tls.sh
       - run: npm test
+      - name: Packaging guard (foreign-skin cleanup)
+        run: sh tests/packaging/foreign-skins-guard.sh .
       - run: npm run build
 
   e2e-tests:
@@ -55,6 +100,18 @@ jobs:
       - name: Wait for server
         run: npx wait-on http://localhost:5173 --timeout 30000
 
+      - name: Run admin board credential guard (mandatory)
+        # The :8090 board must REFUSE to render a login form against a router
+        # whose root /etc/shadow hash is unset: rpcd's session.login accepts ANY
+        # password (including "") while it is empty, so a successful login would
+        # prove nothing. Runs the real Preact app in VITE_MOCK mode, with the
+        # router's state selected by ?mockCredentialState=.
+        #
+        # It runs before the portal functional suite: it is self-contained (its
+        # own vite dev server on :5199), and the credential gate must not be
+        # masked by an unrelated portal test failure.
+        run: npx playwright test --config admin/playwright.config.mjs admin-credential-guard
+
       - name: Run functional tests (mandatory)
         run: npx playwright test tests/e2e/functional.spec.mjs --project=desktop
 
@@ -69,7 +126,7 @@ jobs:
           path: |
             test-results/output/
             test-results/report/
-          retention-days: 30
+          retention-days: 3
 
       - name: Upload visual diffs
         uses: actions/upload-artifact@v4
@@ -79,7 +136,7 @@ jobs:
           path: |
             tests/e2e/**/*.png
             test-results/output/*-diff.png
-          retention-days: 30
+          retention-days: 3
 
       - name: Post screenshots link to PR
         if: github.event_name == 'pull_request'
