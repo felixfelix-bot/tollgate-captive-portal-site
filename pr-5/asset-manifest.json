@@ -1,0 +1,33 @@
+{
+  "assets": {
+    "js": [
+      "assets/balance-C1gfk-bY.js",
+      "assets/browser-ponyfill-DJTnkmfw.js",
+      "assets/index-Dm7s2Idy.js",
+      "assets/portal-Z7kUA2lY.js",
+      "assets/qr-scanner-worker.min-D85Z9gVD.js",
+      "assets/qr-scanner.min-B3Ol_GM9.js"
+    ],
+    "css": [
+      "assets/balance-5KSP87Gz.css",
+      "assets/index-CSbRLgwZ.css"
+    ],
+    "images": [
+      "assets/TollGate_Logo-C-white-D93CsdZc.png",
+      "favicon.ico",
+      "logo192.png",
+      "logo512.png"
+    ],
+    "locales": [
+      "locales/en.json"
+    ],
+    "html": [
+      "404.html",
+      "balance.html",
+      "index.html"
+    ],
+    "manifest": [
+      "manifest.json"
+    ]
+  }
+}
