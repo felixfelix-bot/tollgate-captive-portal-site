@@ -138,7 +138,7 @@ export const Lightning = (props) => {
       {(!success && processing) && <Processing label={t('processing_invoice_request')} />}
 
       {/* accessgranted: shows a success message and the amount of access granted after a successful payment */}
-      {(success && !processing) && <AccessGranted allocation={`${allocation.value} ${allocation.unit}`} />}
+      {(success && !processing && allocation) && <AccessGranted allocation={`${allocation.value} ${allocation.unit}`} />}
 
       {/* unitinput: input field for entering the amount to pay, and selecting access option */}
       {(!success && !processing && accessOptions.length > 0 && !invoiceData) && <UnitInput
@@ -244,7 +244,6 @@ const UnitInput = ({ pricingInfo, selectedMint, unitAmount, setUnitAmount }) => 
       id="lightning-unit-amount"
       onChange={(e) => {
         if (e.target.value.length) {
-          console.log(typeof e.target.value, e.target.value.length, e.target.value)
           // if is a number and not 0
           if (!isNaN(Number(e.target.value)) && Number(e.target.value)) {
             setUnitAmount(Number(e.target.value))
