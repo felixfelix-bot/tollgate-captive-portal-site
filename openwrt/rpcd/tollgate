@@ -1,0 +1,386 @@
+#!/bin/sh
+# rpcd plugin for tollgate --json commands
+# Methods map 1:1 to tollgate --json CLI commands, with two deliberate
+# exceptions that are plugin-local because they are FACTS ABOUT the router's
+# credential rather than operations on it: `auth_status` (below) and
+# `admin_credential_claim` (the board's forced password choice).
+. /usr/share/libubox/jshn.sh
+
+# ─── root credential state (fail closed) ─────────────────────────────────────
+#
+# rpcd's own login check (rpcd/session.c, rpc_login_test_password) starts with
+#
+#     /* password is not set */
+#     if (!hash || !*hash) { return true; }
+#
+# and the distribution's /etc/config/rpcd sets the login password to `$p$root`,
+# i.e. getspnam("root")->sp_pwdp. So while root's /etc/shadow hash is EMPTY,
+# session.login succeeds with ANY password — including the empty string — and
+# the session that comes out carries this ACL (file exec, system.password_set,
+# wallet_drain_cashu). The admin board is exactly that session.
+#
+# We cannot patch rpcd, so the plugin refuses: every method that acts on the
+# router fails closed while root has no usable credential, and the board's UI
+# uses the pre-auth `auth_status` probe below to refuse to render a login form
+# at all. Only the credential STATE is exposed — never a hash or a password.
+#
+# '!' / '*' is a LOCKED account: crypt() can never match it, so it is not
+# credential-less and nothing here refuses on it.
+SHADOW_FILE="${TOLLGATE_SHADOW_FILE:-/etc/shadow}"
+
+# The install-time markers the module's packaging/files/etc/uci-defaults/
+# 99-tollgate-setup drops when it installed a FIXED DEFAULT credential rather
+# than one the operator chose (the installer can only hand one in through
+# TOLLGATE_ADMIN_PASSWORD, and uci-defaults run with no controlling terminal).
+# Each records a FACT — the credential is the default, not a chosen one — and
+# deliberately no secret, because the file is world-readable.
+#
+# `auth_status` reports their existence; the first-run `admin_credential_setup`
+# clears the admin one (always, once the owner's own password is set) and the
+# WiFi one (only once the owner's own passphrase is set). That is the whole
+# client contract for the board's forced credential choice. The default paths
+# are the module's own, and they are overridable so the offline tests can point
+# at throw-away files (packaging/tests/).
+ADMIN_PROVISIONAL_MARKER="${ADMIN_PROVISIONAL_MARKER:-/etc/tollgate/admin-credential-provisional}"
+PRIVATE_WIFI_PROVISIONAL_MARKER="${PRIVATE_WIFI_PROVISIONAL_MARKER:-/etc/tollgate/private-wifi-credential-provisional}"
+
+root_hash_state() {
+    local h
+    h=$(awk -F: '$1=="root"{print $2}' "$SHADOW_FILE" 2>/dev/null)
+    case "$h" in
+        "")        echo empty ;;
+        '!'*|'*'*) echo locked ;;
+        ?*)        echo set ;;
+        *)         echo unknown ;;
+    esac
+}
+
+# admin_credential_provisional: true while the marker FILE exists. Existence
+# only — the file's text is never read, never parsed and never emitted.
+admin_credential_provisional() {
+    [ -f "$ADMIN_PROVISIONAL_MARKER" ]
+}
+
+# private_wifi_provisional: true while the private (management) WiFi key is the
+# package DEFAULT. Same contract as the admin marker, one level down: the board
+# forces the owner to choose a WiFi passphrase too.
+private_wifi_provisional() {
+    [ -f "$PRIVATE_WIFI_PROVISIONAL_MARKER" ]
+}
+
+# credential_usable: true when root's hash is `set` (only the real password
+# matches) or `locked` ('!'/'*'): crypt() can never return a lock sentinel, so
+# nobody can authenticate with a password either. `empty` (ANY password
+# authenticates) and `unknown` (state could not be read) are not usable.
+credential_usable() {
+    case "$(root_hash_state)" in
+        set|locked) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
+
+json_credential_refusal() {
+    json_init
+    json_add_boolean "success" 0
+    json_add_string "error" "no-admin-credential"
+    json_add_string "message" "router has no usable root password: refusing. While root's /etc/shadow hash is unset, rpcd accepts ANY password (including an empty one), so an authenticated session cannot be trusted. Set a root password on the router (passwd root) and re-run the board setup."
+    json_dump
+}
+
+case "$1" in
+  list)
+    echo '{
+      "auth_status":{},
+      "admin_credential_setup":{"password":"string","password2":"string","wifi_passphrase":"string"},
+      "admin_credential_claim":{},
+      "config_schema":{},
+      "config_get":{},
+      "config_set":{"key":"string","value":"string"},
+      "config_save":{"json":"string"},
+      "config_save_identities":{"json":"string"},
+      "wallet_balance":{},
+      "wallet_info":{},
+      "wallet_fund":{"token":"string"},
+      "wallet_drain_cashu":{},
+      "status":{},
+      "health":{},
+      "ui_links":{},
+      "upstream_scan":{},
+      "upstream_connect":{"ssid":"string","passphrase":"string"},
+      "upstream_list":{},
+      "upstream_remove":{"ssid":"string"}
+    }'
+    ;;
+  call)
+    # Pre-auth probe: the credential STATE only (empty | locked | set |
+    # unknown). Granted to unauthenticated sessions by the `unauthenticated`
+    # group in tollgate_acl.json, because the board must be able to refuse a
+    # login form BEFORE it has a session. No hash, no password, no username
+    # list — nothing here is a secret, and revealing "this router has no root
+    # password" tells an attacker nothing they would not learn by simply
+    # submitting an empty password.
+    if [ "$2" = "auth_status" ]; then
+        CRED_STATE=$(root_hash_state)
+        json_init
+        json_add_string "username" "root"
+        json_add_string "state" "$CRED_STATE"
+        if [ "$CRED_STATE" = "set" ]; then
+            json_add_boolean "password_set" 1
+        else
+            json_add_boolean "password_set" 0
+        fi
+        # The install-time marker, as a boolean. The board asks this BEFORE it
+        # renders a login form: a provisional credential means the password on
+        # this router was generated by the installer, so the owner must choose
+        # their own before the board becomes usable. Existence only — the
+        # marker's text (which carries no secret either) is never read.
+        if admin_credential_provisional; then
+            json_add_boolean "provisional" 1
+        else
+            json_add_boolean "provisional" 0
+        fi
+        # Companion fact for the private (management) WiFi, so the board can
+        # force a WiFi passphrase choice too. Existence only.
+        if private_wifi_provisional; then
+            json_add_boolean "private_wifi_provisional" 1
+        else
+            json_add_boolean "private_wifi_provisional" 0
+        fi
+        json_dump
+        exit 0
+    fi
+
+    # FIRST-RUN, PRE-AUTH: while the install-time marker stands, the owner
+    # chooses their OWN root password and private-WiFi passphrase WITHOUT a
+    # session. This is the only method that runs before authentication, and only
+    # because the generated credential is deliberately never printed — there is
+    # nothing to log in with until the owner sets one. Guarded to the provisional
+    # window: it refuses the moment the marker is gone, and it is reachable only
+    # on the management path (the board is not on the captive/guest network).
+    # It sets ONLY the root password and the private radios' PSK; nothing else.
+    if [ "$2" = "admin_credential_setup" ]; then
+        if ! admin_credential_provisional; then
+            json_init
+            json_add_boolean "success" 0
+            json_add_string "error" "not-provisional"
+            json_add_string "message" "this router's credential is not provisional; the first-run setup is disabled"
+            json_dump
+            exit 0
+        fi
+        INPUT=$(cat)
+        PW=$(echo "$INPUT" | jsonfilter -e '@.password' 2>/dev/null)
+        PW2=$(echo "$INPUT" | jsonfilter -e '@.password2' 2>/dev/null)
+        WIFI=$(echo "$INPUT" | jsonfilter -e '@.wifi_passphrase' 2>/dev/null)
+        if [ "${#PW}" -lt 8 ]; then
+            json_init
+            json_add_boolean "success" 0
+            json_add_string "error" "weak-password"
+            json_add_string "message" "Use at least 8 characters for the admin password"
+            json_dump
+            exit 0
+        fi
+        if [ -n "$PW2" ] && [ "$PW" != "$PW2" ]; then
+            json_init
+            json_add_boolean "success" 0
+            json_add_string "error" "mismatch"
+            json_add_string "message" "The two admin passwords do not match"
+            json_dump
+            exit 0
+        fi
+        printf '%s\n%s\n' "$PW" "$PW" | passwd root >/dev/null 2>&1
+        case "$(root_hash_state)" in
+            set|locked) : ;;
+            *)
+                json_init
+                json_add_boolean "success" 0
+                json_add_string "error" "password-not-applied"
+                json_add_string "message" "the router did not accept the new admin password"
+                json_dump
+                exit 0
+                ;;
+        esac
+        if [ -n "$WIFI" ] && [ "${#WIFI}" -ge 8 ] && [ "${#WIFI}" -le 63 ]; then
+            uci -q set wireless.private_radio0.key="$WIFI" 2>/dev/null
+            uci -q set wireless.private_radio1.key="$WIFI" 2>/dev/null
+            uci -q commit wireless 2>/dev/null
+            ubus call network.wireless reload >/dev/null 2>&1
+            # The owner's own passphrase now stands: drop the WiFi marker so the
+            # board stops forcing a WiFi choice. It is LEFT IN PLACE when the
+            # WiFi was not set, so the forced choice persists — the UI requires
+            # the field whenever this marker stands.
+            rm -f "$PRIVATE_WIFI_PROVISIONAL_MARKER" 2>/dev/null
+        fi
+        rm -f "$ADMIN_PROVISIONAL_MARKER" 2>/dev/null
+        json_init
+        if admin_credential_provisional; then
+            json_add_boolean "success" 0
+            json_add_boolean "provisional" 1
+            json_add_string "error" "marker-not-removed"
+            json_add_string "message" "the admin password was set but the first-run marker could not be cleared; retry"
+        else
+            json_add_boolean "success" 1
+            json_add_boolean "provisional" 0
+            json_add_string "message" "your admin password is set; sign in with it"
+        fi
+        json_dump
+        exit 0
+    fi
+
+    # FAIL CLOSED: while root has no usable password, an authenticated session
+    # proves nothing (rpcd accepts any password against an empty hash), so no
+    # method that acts on the router may run. auth_status above is the only
+    # exception — it is the probe that lets the board explain the state.
+    if ! credential_usable; then
+        json_credential_refusal
+        exit 0
+    fi
+
+    case "$2" in
+      admin_credential_claim)
+        # The board has made the owner set their OWN password (rpcd's
+        # system.password_set, called first — the SPA orders it), so the only
+        # thing left is to drop the install-time marker. Idempotent: a claim on
+        # a router whose marker is already gone reports provisional=0 instead of
+        # failing, so a double submit cannot wedge the board.
+        #
+        # The marker must NOT outlive a failed removal: report what is actually
+        # on disk (never a false success), because a claim that lies would walk
+        # the operator to a board that is gated again on the next load.
+        if [ -f "$ADMIN_PROVISIONAL_MARKER" ]; then
+            rm -f "$ADMIN_PROVISIONAL_MARKER" 2>/dev/null
+        fi
+        json_init
+        if admin_credential_provisional; then
+            json_add_boolean "success" 0
+            json_add_boolean "provisional" 1
+            json_add_string "error" "the provisional credential marker could not be removed"
+        else
+            json_add_boolean "success" 1
+            json_add_boolean "provisional" 0
+            json_add_string "message" "the admin credential is now the operator's own"
+        fi
+        json_dump
+        ;;
+      config_schema)
+        tollgate --json config schema 2>/dev/null
+        ;;
+      config_get)
+        tollgate --json config get 2>/dev/null
+        ;;
+      config_set)
+        INPUT=$(cat)
+        KEY=$(echo "$INPUT" | jsonfilter -e '@.key' 2>/dev/null)
+        VAL=$(echo "$INPUT" | jsonfilter -e '@.value' 2>/dev/null)
+        if [ -z "$KEY" ]; then
+          json_init
+          json_add_boolean "success" 0
+          json_add_string "error" "key is required"
+          json_dump
+          exit 0
+        fi
+        tollgate --json config set "$KEY" "$VAL" 2>/dev/null
+        ;;
+      config_save)
+        INPUT=$(cat)
+        JSON=$(echo "$INPUT" | jsonfilter -e '@.json' 2>/dev/null)
+        if [ -z "$JSON" ]; then
+          json_init
+          json_add_boolean "success" 0
+          json_add_string "error" "json is required"
+          json_dump
+          exit 0
+        fi
+        echo "$JSON" | tollgate --json config save 2>/dev/null
+        ;;
+      config_save_identities)
+        INPUT=$(cat)
+        JSON=$(echo "$INPUT" | jsonfilter -e '@.json' 2>/dev/null)
+        if [ -z "$JSON" ]; then
+          json_init
+          json_add_boolean "success" 0
+          json_add_string "error" "json is required"
+          json_dump
+          exit 0
+        fi
+        echo "$JSON" | tollgate --json config save-identities 2>/dev/null
+        ;;
+      wallet_balance)
+        tollgate --json wallet balance 2>/dev/null
+        ;;
+      wallet_info)
+        tollgate --json wallet info 2>/dev/null
+        ;;
+      wallet_fund)
+        INPUT=$(cat)
+        TOKEN=$(echo "$INPUT" | jsonfilter -e '@.token' 2>/dev/null)
+        if [ -z "$TOKEN" ]; then
+          json_init
+          json_add_boolean "success" 0
+          json_add_string "error" "token is required"
+          json_dump
+          exit 0
+        fi
+        tollgate --json wallet fund "$TOKEN" 2>/dev/null
+        ;;
+      wallet_drain_cashu)
+        tollgate --json wallet drain cashu 2>/dev/null
+        ;;
+      status)
+        tollgate --json status 2>/dev/null
+        ;;
+      health)
+        tollgate --json health 2>/dev/null
+        ;;
+      ui_links)
+        # The router's answer for the board's cross-link to the OTHER admin UI
+        # (LuCI). Whether LuCI answers :8080/:443 or :8090/:8443 depends on the
+        # live mapping, so the SPA must never guess a port or build a URL from
+        # location.hostname — it renders what this prints, and renders NOTHING
+        # with the `reason` when a UI has no usable (HTTPS, covering-identity)
+        # link. Read-only, informational; no secret (a LAN admin url).
+        tollgate ui links --json 2>/dev/null
+        ;;
+      upstream_scan)
+        tollgate --json upstream scan 2>/dev/null
+        ;;
+      upstream_connect)
+        INPUT=$(cat)
+        SSID=$(echo "$INPUT" | jsonfilter -e '@.ssid' 2>/dev/null)
+        PASS=$(echo "$INPUT" | jsonfilter -e '@.passphrase' 2>/dev/null)
+        if [ -z "$SSID" ]; then
+          json_init
+          json_add_boolean "success" 0
+          json_add_string "error" "ssid is required"
+          json_dump
+          exit 0
+        fi
+        if [ -n "$PASS" ]; then
+          tollgate --json upstream connect "$SSID" "$PASS" 2>/dev/null
+        else
+          tollgate --json upstream connect "$SSID" 2>/dev/null
+        fi
+        ;;
+      upstream_list)
+        tollgate --json upstream list 2>/dev/null
+        ;;
+      upstream_remove)
+        INPUT=$(cat)
+        SSID=$(echo "$INPUT" | jsonfilter -e '@.ssid' 2>/dev/null)
+        if [ -z "$SSID" ]; then
+          json_init
+          json_add_boolean "success" 0
+          json_add_string "error" "ssid is required"
+          json_dump
+          exit 0
+        fi
+        tollgate --json upstream remove "$SSID" 2>/dev/null
+        ;;
+      *)
+        json_init
+        json_add_boolean "success" 0
+        json_add_string "error" "unknown method"
+        json_dump
+        ;;
+    esac
+    ;;
+esac
