@@ -1,0 +1,181 @@
+#!/bin/sh
+# TollGate admin board setup: create/repair the dedicated uhttpd instance on
+# :8090 and make sure rpcd (which serves the `tollgate` ubus object) is running.
+#
+# The admin SPA is served at the ROOT of :8090 from its BRAND webroot
+# (/www/<brand>; the generic default is /www/tollgate). The packaging build
+# substitutes __ADMIN_HOME__ for the brand it builds (see the feed Makefile), so
+# a build can never point at a leftover webroot from another brand. Do NOT guess
+# the webroot by directory existence.
+#
+# Scheme: the board is served over plain HTTP on :8090 — the URL people type
+# (http://<router>:8090/) and the same scheme as LuCI on :8080. When a cert/key
+# pair exists, an OPT-IN HTTPS listener is added on :8443, because one uhttpd
+# instance cannot serve HTTP and HTTPS on the same port (bind: Address already
+# in use) and an HTTPS-only :8090 would make http://<router>:8090/ fail outright.
+# Never advertise a TLS listener without a cert — uhttpd would fail to start it.
+#
+# LuCI stays on uhttpd.main (:8080; webroot /www) and the captive portal on
+# uhttpd.portal (:2051). :8090 (and :8443) belong to the admin instance ALONE,
+# so they are removed from any other section.
+#
+# The admin instance must NEVER expose LuCI. With home=/www/<brand>, a request to
+# /cgi-bin/luci resolves to /www/<brand>/cgi-bin/luci (absent) -> 404 ->
+# error_page (/index.html = the board). This is why home must never be /www:
+# with home=/www, uhttpd's default cgi_prefix=/cgi-bin served the real LuCI CGI on
+# :8090 (see the MT3000 incident, 2026-09-20). The cgi/lua prefixes are deleted
+# outright as belt-and-braces.
+#
+# Idempotent: creates the section if missing, ALWAYS re-asserts every option, so
+# it also repairs the older home=/www + /tollgate/ scheme and a stale
+# HTTPS-only :8090 left behind by an earlier build.
+
+# Brand webroot. __ADMIN_HOME__ is substituted at package build time
+# (/www/<brand>, e.g. /www/tollgate for the generic default build). Fall back to
+# the default webroot if a build forgot to substitute it.
+ADMIN_HOME="__ADMIN_HOME__"
+case "$ADMIN_HOME" in
+  *__ADMIN_HOME__*|"") ADMIN_HOME="/www/tollgate" ;;
+esac
+
+# Create or repair the admin instance.
+uci -q get uhttpd.admin >/dev/null 2>&1 || uci set uhttpd.admin=uhttpd
+uci -q delete uhttpd.admin.listen_http
+uci -q delete uhttpd.admin.listen_https
+uci add_list uhttpd.admin.listen_http='0.0.0.0:8090'
+uci add_list uhttpd.admin.listen_http='[::]:8090'
+uci -q delete uhttpd.admin.cert
+uci -q delete uhttpd.admin.key
+if [ -f /etc/uhttpd.crt ] && [ -f /etc/uhttpd.key ]; then
+    uci add_list uhttpd.admin.listen_https='0.0.0.0:8443'
+    uci add_list uhttpd.admin.listen_https='[::]:8443'
+    uci set uhttpd.admin.cert='/etc/uhttpd.crt'
+    uci set uhttpd.admin.key='/etc/uhttpd.key'
+fi
+uci set uhttpd.admin.ubus_prefix='/ubus'
+uci set uhttpd.admin.script_timeout='60'
+uci set uhttpd.admin.network_timeout='30'
+uci set uhttpd.admin.max_requests='3'
+uci set uhttpd.admin.tcp_keepalive='1'
+uci set uhttpd.admin.no_dirlists='1'
+uci set uhttpd.admin.home="$ADMIN_HOME"
+uci set uhttpd.admin.error_page='/index.html'
+# Never let the admin port expose LuCI's /cgi-bin/luci via an explicit override.
+uci -q delete uhttpd.admin.cgi_prefix
+uci -q delete uhttpd.admin.lua_prefix
+
+# :8090 / :8443 belong to the admin instance only — strip them from any other
+# section (a stale `uhttpd.luci`-style section must not own the admin port).
+for sec in $(uci show uhttpd 2>/dev/null | sed -n 's/^uhttpd\.\([^.]*\)=uhttpd$/\1/p'); do
+    [ "$sec" = "admin" ] && continue
+    uci -q del_list "uhttpd.$sec.listen_http=0.0.0.0:8090" 2>/dev/null
+    uci -q del_list "uhttpd.$sec.listen_http=[::]:8090" 2>/dev/null
+    uci -q del_list "uhttpd.$sec.listen_https=0.0.0.0:8090" 2>/dev/null
+    uci -q del_list "uhttpd.$sec.listen_https=[::]:8090" 2>/dev/null
+    uci -q del_list "uhttpd.$sec.listen_https=0.0.0.0:8443" 2>/dev/null
+    uci -q del_list "uhttpd.$sec.listen_https=[::]:8443" 2>/dev/null
+done
+
+# Rebrand: a brand build must not serve a leftover skin from a foreign brand.
+# The packaging build substitutes __FOREIGN_SKINS__ with whitespace-separated
+# "<webroot>:<uhttpd-section>" tokens, one per OTHER known brand skin (e.g. the
+# generic default build lists the other vendors' webroots/sections, and a
+# branded build lists the generic + the remaining vendors). Each foreign uhttpd
+# section and webroot is dropped so only this brand's webroot can be served.
+# Falls back to no-op when a build forgot to substitute the list.
+FOREIGN="__FOREIGN_SKINS__"
+for skin in $FOREIGN; do
+    webroot="${skin%%:*}"
+    section="${skin##*:}"
+    [ -n "$webroot" ] && [ -n "$section" ] && [ "$webroot" != "$section" ] || continue
+    # Normalize trailing slashes first: /www/tollgate/ would otherwise slip past
+    # the self-deletion guard below (rm -rf /www/tollgate/ == /www/tollgate).
+    while [ "${webroot%/}" != "$webroot" ]; do
+        webroot="${webroot%/}"
+    done
+    # Never delete this build's own uhttpd section or webroot - a malformed
+    # token that lists the active brand would drop the board this script just
+    # installed (uci delete uhttpd.admin or rm -rf of its webroot).
+    [ "$section" = "admin" ] && continue
+    [ "$webroot" = "$ADMIN_HOME" ] && continue
+    # Only ever delete a brand webroot *under* /www: /www itself (or /www/,
+    # normalized above) is LuCI's webroot, and anything outside /www is not ours.
+    case "$webroot" in
+      /www/*) ;;
+      *) continue ;;
+    esac
+    uci -q delete "uhttpd.$section" 2>/dev/null
+    rm -rf "$webroot" 2>/dev/null
+done
+
+uci commit uhttpd
+
+# Ensure the admin board is reachable from the captive LAN without
+# authentication. The module's 99-tollgate-setup also adds these, but that runs
+# only on a FULL setup pass (first boot or a setup-version change), which is
+# skipped on an apk upgrade — so re-assert here, on every install/upgrade.
+# Section-guarded: the nodogsplash section may not exist yet, depending on
+# install ordering (99 runs full setup and creates it when this is a first boot).
+if uci -q get nodogsplash.@nodogsplash[0] >/dev/null 2>&1; then
+    nds_users=$(uci -q get nodogsplash.@nodogsplash[0].users_to_router 2>/dev/null)
+    for port in 8090 8443; do
+        if ! echo "$nds_users" | grep -q "port $port"; then
+            uci add_list nodogsplash.@nodogsplash[0].users_to_router="allow tcp port $port"
+        fi
+    done
+    uci commit nodogsplash
+fi
+
+# LuCI (uhttpd.main :8080) presents a login over plain HTTP, which browsers
+# flag as an insecure password field. Redirect it to the TLS listener when one
+# is actually configured on uhttpd.main; the board's own :8090 stays HTTP by
+# design.
+#
+# The redirect target is uhttpd.main's OWN listen_https. "A cert/key exists" is
+# NOT a sufficient guard for it: uhttpd.main.listen_https is configured by the
+# module's 99-tollgate-setup, which only runs a FULL setup pass (first boot or a
+# setup-version change) - an apk upgrade takes its narrow branch. A router whose
+# certs appeared after its last full setup therefore has certs but no :443
+# listener, and enabling the redirect there sends every :8080 LuCI request to a
+# dead port (the 2026-09-21 pre13 LuCI lockout). Require a readable, non-empty
+# cert/key pair AND a configured listener, and always write an explicit value so
+# a stale '1' left by an earlier install is repaired rather than kept.
+#
+# Keep this rule identical to the module's 99-tollgate-setup: both scripts write
+# uhttpd.main.redirect_https, install order decides which lands last, so the two
+# must agree on the value.
+if uci -q get uhttpd.main >/dev/null 2>&1; then
+    if [ -r /etc/uhttpd.crt ] && [ -s /etc/uhttpd.crt ] &&
+       [ -r /etc/uhttpd.key ] && [ -s /etc/uhttpd.key ] &&
+       [ -n "$(uci -q get uhttpd.main.listen_https 2>/dev/null)" ]; then
+        uci set uhttpd.main.redirect_https='1'
+    else
+        uci set uhttpd.main.redirect_https='0'
+    fi
+    uci commit uhttpd
+fi
+
+# Resolve .apk-new files left by apk when existing files were modified.
+find "$ADMIN_HOME" -name '*.apk-new' \
+    -exec sh -c 'mv "$1" "${1%.apk-new}"' _ {} \; 2>/dev/null
+
+/etc/init.d/rpcd restart
+/etc/init.d/uhttpd restart
+
+# Fail open: the redirect is only safe if the TLS listener it targets actually
+# came up - uhttpd can accept listen_https in config and still fail to bind :443
+# (unusable cert, port conflict), which would lock LuCI behind a dead redirect
+# again. Verify a LISTEN socket on :443 and, if it is missing, drop the redirect
+# and restart once. This only ever turns the redirect OFF.
+if uci -q get uhttpd.main >/dev/null 2>&1 &&
+   [ "$(uci -q get uhttpd.main.redirect_https 2>/dev/null)" = "1" ]; then
+    sleep 1
+    if ! awk '$2 ~ /:01BB$/ && $4 == "0A" { f = 1 } END { exit !f }' \
+             /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+        uci set uhttpd.main.redirect_https='0'
+        uci commit uhttpd
+        /etc/init.d/uhttpd restart
+    fi
+fi
+
+exit 0

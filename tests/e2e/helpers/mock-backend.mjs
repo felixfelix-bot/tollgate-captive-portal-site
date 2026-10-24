@@ -28,6 +28,56 @@ export const validateToken = (token, mint, i18n) => {
 };
 export const submitToken = async () => ({ status: 1, label: 'ok', message: 'ok' });
 export const extractProofsFromToken = () => [];
+
+// --- the rest of the module's export surface -------------------------------
+//
+// The stub replaces src/helpers/cashu.js, and src/components/Cashu.jsx imports
+// { validateToken, submitToken, canSubmitAnyway, mintUrlFromToken, findMintOption }
+// from it. A stub that exports only the mint-touching half does not merely skip
+// those code paths — the ES module link fails, the app never hydrates, and the
+// lane can never run at all (measured: "The requested module
+// '/src/helpers/cashu.js' does not provide an export named …"). So every name
+// the module under test imports must be exported here.
+//
+// canSubmitAnyway and findMintOption are copied VERBATIM from the real helper:
+// they are pure, and a stub that drifted from the real gating would pin the wrong
+// behaviour. If the real helper changes, change these with it.
+export const canSubmitAnyway = (validation) =>
+  !!validation && validation.status !== 1 && validation.code === "CU102";
+
+export const normalizeMintUrl = (url) => {
+  if ("string" !== typeof url) return null;
+
+  let value = url.trim().toLowerCase();
+  if (!value) return null;
+
+  const scheme = value.startsWith("http://") ? "http" : "https";
+  value = value.replace(scheme === "http" ? /:80(?=\\/|$)/ : /:443(?=\\/|$)/, "");
+  value = value.replace(/^https?:\\/\\//, "");
+  value = value.replace(/[?#].*$/, "");
+  value = value.replace(/\\/+$/, "");
+
+  return value.length ? value : null;
+};
+
+export const findMintOption = (mintUrl, options) => {
+  const wanted = normalizeMintUrl(mintUrl);
+  if (!wanted || !Array.isArray(options)) return null;
+
+  return options.find((option) => normalizeMintUrl(option?.url) === wanted) || null;
+};
+
+// NOT mirrored: the real mintUrlFromToken decodes the note with cashu-ts
+// (getTokenMetadata primary, getDecodedToken fallback) to learn which mint
+// issued it. The stub exists to keep the cashu-ts decoders OUT of this lane, so
+// it answers null — the documented "mint unknowable" answer the real helper
+// uses for garbage and ambiguous notes, and a shape Cashu.jsx already handles
+// (it asks the user / falls back to the advertised list). Consequence, stated
+// plainly: this lane does NOT exercise mint auto-selection from a pasted note;
+// that decode path is covered by tests/unit/cashu-validateToken.test.js.
+// Replacing the module stub with real network-level stubbing (so the real
+// decoder runs here too) is the open half of REGRESSION-A.
+export const mintUrlFromToken = () => null;
 `;
 
 export const TEST_TOKEN = 'cashuBtest123MockTokenForE2E';
@@ -37,7 +87,12 @@ export async function setupMockBackend(page, options = {}) {
     usageResponse = '60000/600000',
     usageExpired = false,
     usageHang = false,
+    metricOverride = null,
   } = options;
+
+  const details = metricOverride
+    ? { ...MOCK_TOLLGATE_DETAILS, tags: MOCK_TOLLGATE_DETAILS.tags.map(t => t[0] === 'metric' ? ['metric', metricOverride] : t) }
+    : MOCK_TOLLGATE_DETAILS;
 
   await page.route('**/*', async (route, request) => {
     const url = new URL(request.url());
@@ -71,7 +126,7 @@ export async function setupMockBackend(page, options = {}) {
         return route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify(MOCK_TOLLGATE_DETAILS),
+          body: JSON.stringify(details),
         });
       }
       if (path === '/usage') {
@@ -101,6 +156,29 @@ export async function setupMockBackend(page, options = {}) {
             allotment: 600000,
             start_time: 1,
           }),
+        });
+      }
+      if (path === '/ln-invoice') {
+        // capability probe is a GET without a quote; a real purchase is a POST
+        if (method === 'POST') {
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              status: 1,
+              quote: 'test-quote',
+              invoice: 'lnbc1mockinvoice',
+              mint_url: 'https://mint.minibits.cash/Bitcoin',
+              amount: 210,
+              expiry: 0,
+              state: 'UNPAID',
+            }),
+          });
+        }
+        return route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 0, error: 'quote is required' }),
         });
       }
     }

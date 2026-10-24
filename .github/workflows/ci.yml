@@ -36,6 +36,8 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm test
+      - name: Packaging guard (foreign-skin cleanup)
+        run: sh tests/packaging/foreign-skins-guard.sh .
       - run: npm run build
 
   e2e-tests:
@@ -69,7 +71,7 @@ jobs:
           path: |
             test-results/output/
             test-results/report/
-          retention-days: 30
+          retention-days: 3
 
       - name: Upload visual diffs
         uses: actions/upload-artifact@v4
@@ -79,7 +81,7 @@ jobs:
           path: |
             tests/e2e/**/*.png
             test-results/output/*-diff.png
-          retention-days: 30
+          retention-days: 3
 
       - name: Post screenshots link to PR
         if: github.event_name == 'pull_request'
