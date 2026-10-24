@@ -1,5 +1,5 @@
 // external
-import { getDecodedToken } from "@cashu/cashu-ts";
+import { getTokenMetadata, getDecodedToken } from "@cashu/cashu-ts";
 import { getPublicKey, getEventHash, getSignature } from "nostr-tools";
 
 // helpers
@@ -34,6 +34,19 @@ export const extractProofsFromToken = (decodedToken) => {
         }
       });
     }
+    // handle getTokenMetadata output (keyset-agnostic summary): the proofs are
+    // carried under `incompleteProofs`. These are real proofs (secret, C,
+    // amount, dleq) with their keyset id intentionally stripped — sufficient
+    // to sum the token value for display; presence does not imply DLEQ validity.
+    else if (decodedToken.incompleteProofs && Array.isArray(decodedToken.incompleteProofs)) {
+      proofs.push(...decodedToken.incompleteProofs);
+    }
+    // handle a bare getTokenMetadata metadata object with no proof list at all —
+    // the amount is already summed, synthesize a single synthetic proof so value
+    // display still works.
+    else if (typeof decodedToken.amount !== 'undefined') {
+      proofs.push({ amount: decodedToken.amount });
+    }
   } catch (error) {
     // log and ignore extraction errors
     console.error("error extracting proofs:", error);
@@ -65,20 +78,35 @@ export const validateToken = (token = "", mint, i18n) => {
       };
     }
 
-    // NUT #00: cashu[version][token] — `cashu` is the Cashu token prefix. `[version]` is a single `base64_urlsafe` character to denote the token format version.
-    // attempt to decode the token using the getDecodedToken method
+    // attempt to decode the token.
+    //
+    // PRIMARY PATH — getTokenMetadata: a keyset-agnostic decoder that works
+    // WITHOUT the mint's keyset list. cashu-ts's getDecodedToken(token) (no
+    // keysets) throws on v4 cashuB tokens whose proofs carry a v2 SHORT keyset
+    // id (e.g. coinos.io or minibits cashuB notes) — the "A short keyset ID v2
+    // was encountered, but got no keysets to map it to." error that was being
+    // misreported as CU102. getTokenMetadata resolves proofs without needing to
+    // map short -> full keyset ids, so those tokens decode here. The backend
+    // (merchant) re-decodes authoritatively on submit.
+    //
+    // FALLBACK PATH — getDecodedToken: getTokenMetadata throws on multi-entry
+    // (multi-mint) V3 tokens, which getDecodedToken-with-keysets handled. Keep
+    // it so multi-mint tokens (which cashu-ts 2.9.0 requires MintKeyset objects
+    // for) can still fall through to this decoder when it can decode them.
+    const trimmedToken = token.trim();
     let decodedToken = null;
     try {
-      decodedToken = getDecodedToken(token.trim());
-      if (!decodedToken) {
-        return {
-          status: 0,
-          code: "CU102",
-          label: i18n("CU102_label"),
-          message: i18n("CU102_message"),
-        };
+      decodedToken = getTokenMetadata(trimmedToken) || null;
+    } catch (errMeta) {
+      console.error("getTokenMetadata failed for token:", errMeta);
+      try {
+        decodedToken = getDecodedToken(trimmedToken);
+      } catch (errDecode) {
+        console.error("getDecodedToken fallback failed for token:", errDecode);
+        decodedToken = null;
       }
-    } catch (err) {
+    }
+    if (!decodedToken) {
       return {
         status: 0,
         code: "CU102",
@@ -98,13 +126,26 @@ export const validateToken = (token = "", mint, i18n) => {
       };
     }
 
-    // calculate the sum of proof values
     const totalAmount = proofs.reduce((sum, proof) => {
       const proofAmount = Number(proof.amount || 0);
       return sum + proofAmount;
     }, 0);
 
-    // todo: check if token unit matches mint unit
+    // verify token unit matches the selected mint's unit
+    if (mint && mint.unit) {
+      const decodedUnit = decodedToken.unit || "sat";
+      if (decodedUnit !== mint.unit) {
+        return {
+          status: 0,
+          code: "CU109",
+          label: i18n("CU109_label", "Token unit mismatch"),
+          message: i18n(
+            "CU109_message",
+            `Token unit (${decodedUnit}) does not match mint unit (${mint.unit})`
+          ),
+        };
+      }
+    }
 
     // return the token value with proof details
     return {
@@ -114,7 +155,7 @@ export const validateToken = (token = "", mint, i18n) => {
         hasProofs: true,
         amount: totalAmount,
         proofCount: proofs.length,
-        unit: "sat",
+        unit: decodedToken.unit || "sat",
       },
     };
   } catch (error) {
@@ -129,77 +170,29 @@ export const validateToken = (token = "", mint, i18n) => {
   }
 };
 
-// submit a cashu token to the tollgate backend for payment
-// NUT #00: `Carol` can send `(x, C)` to `Bob` who then checks that `k*hash_to_curve(x) == C` (**verification**), and if so treats it as a valid spend of a token, adding `x` to the list of spent secrets.
-export const submitToken = async (token, tollgateDetails, allocation, i18n) => {
+// The portal may offer the "submit anyway — router will validate it" bypass only
+// for a *decode-only* refusal: the token's keyset could not be resolved client
+// side (CU102), yet the merchant can still attempt an authoritative redemption.
+// Hard format failures are never submittable — CU100 (empty) and CU101 (not a
+// cashu token) carry no usable payload to hand the merchant, so the option is
+// deliberately withheld for them.
+export const canSubmitAnyway = (validation) =>
+  !!validation && validation.status !== 1 && validation.code === "CU102";
+
+// submit a cashu token to the tollgate backend for payment.
+//
+// HTTP-01 raw-token POST: the Cashu token is a bearer instrument, so the
+// backend authorizes the spend from the token itself — not from a Nostr
+// signature. The backend derives the device identifier (MAC) from the
+// request's network context. This matches the curl path used by the test
+// framework's `pay_direct()` and the protocol's `curl -d 'cashuB...'` example.
+export const submitToken = async (token, _tollgateDetails, allocation, i18n) => {
   try {
-    // get tollgate pubkey from event
-    const tollgatePubkey = tollgateDetails.detailsEvent.pubkey;
-    // generate a random private key for signing
-    const privateKeyBytes = window.crypto.getRandomValues(new Uint8Array(32));
-    const privateKeyHex = Array.from(privateKeyBytes)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-
-    // generate the pubkey from private key using nostr-tools
-    let pubkey;
-    try {
-      pubkey = getPublicKey(privateKeyHex);
-    } catch (error) {
-      // failed to generate pubkey
-      console.error("error getting public key:", error);
-      return {
-        status: 0,
-        code: "CU105",
-        label: i18n("CU105_label"),
-        message: i18n("CU105_message"),
-      };
-    }
-
-    // build the event tags. the device-identifier tag is only included when
-    // deviceInfo is available — /whoami may return an error or an empty payload,
-    // and accessing deviceInfo without a guard would throw a TypeError
-    const deviceInfo = tollgateDetails?.deviceInfo;
-    const tags = [
-      ["p", tollgatePubkey],
-      ...(deviceInfo
-        ? [["device-identifier", deviceInfo.type ?? "", deviceInfo.value ?? ""]]
-        : []),
-      ["payment", token],
-    ];
-
-    // create the nostr event according to tip-01 spec
-    const unsignedEvent = {
-      kind: 21000,
-      pubkey: pubkey,
-      content: "",
-      created_at: Math.floor(Date.now() / 1000),
-      tags,
-    };
-
-    // calculate the event hash (id)
-    const id = getEventHash(unsignedEvent);
-
-    // sign the event using signEvent, which is still available
-    const sig = getSignature(unsignedEvent, privateKeyHex);
-
-    // create a clean event object for sending
-    const event = {
-      ...unsignedEvent,
-      id,
-      sig,
-    };
-
-    console.log("sending signed event:", event);
-
-    // send the event to the tollgate server
     const baseUrl = getTollgateBaseUrl();
     const response = await fetch(`${baseUrl}/`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(event),
+      headers: { "Content-Type": "text/plain" },
+      body: token,
     });
 
     if (!response.ok) {
@@ -232,64 +225,88 @@ export const submitToken = async (token, tollgateDetails, allocation, i18n) => {
         console.error("failed to parse error response body:", e);
       }
 
-      if (response.status === 402) {
-        // payment required: the backend rejected the token
-        if (backendCode === "payment-error-dleq-keyset-rotation") {
-          // the mint rotated its keyset — the e-cash note is no longer spendable
-          console.error("DLEQ keyset rotation error:", backendCode, backendMessage);
-          return {
-            status: 0,
-            code: "CU109",
-            label: i18n("CU109_label"),
-            message: i18n("CU109_message"),
-          };
-        } else if (backendMessage) {
-          // use the actual backend error message instead of the generic CU106
-          console.error("backend error:", backendCode, backendMessage);
-          return {
-            status: 0,
-            code: "CU106",
-            label: i18n("CU106_label"),
-            message: backendMessage,
-          };
+      // Map the backend's machine code to a friendly CU code regardless of the
+      // HTTP status: backend kind 21023 notices are sent with 400 (not 402), so
+      // keying off 402 alone missed every coded error.
+      const byCode = {
+        "payment-error-below-swap-fee": "CU110",
+        "payment-error-mint-unreachable": "CU111",
+        "payment-error-dleq-keyset-rotation": "CU109",
+      };
+      let friendlyCode = byCode[backendCode] || null;
+
+      if (!friendlyCode && backendMessage) {
+        const text = String(backendMessage).toLowerCase();
+        if (text.includes("swap fee") || text.includes("nothing to swap") || text.includes("no outputs")) {
+          friendlyCode = "CU110";
+        } else if (text.includes("keyset")) {
+          friendlyCode = "CU109";
+        } else if (
+          text.includes("unreachable") ||
+          text.includes("connection refused") ||
+          text.includes("temporarily unavailable") ||
+          text.includes("no such host")
+        ) {
+          friendlyCode = "CU111";
         }
-        // fallback if the body wasn't a parseable kind 21023
-        console.error("error processing token:", response);
+      }
+
+      if (friendlyCode) {
+        console.error("backend payment error:", backendCode, backendMessage);
+        // CU110/CU111 carry precise, user-facing backend messages (amount/fee);
+        // CU109 keeps its dedicated localized copy.
+        const message = friendlyCode !== "CU109" && backendMessage
+          ? backendMessage
+          : i18n(`${friendlyCode}_message`);
+        return {
+          status: 0,
+          code: friendlyCode,
+          label: i18n(`${friendlyCode}_label`),
+          message,
+        };
+      }
+
+      // Fall back to the previous generic behavior: 402 -> CU106, other -> CU107.
+      if (response.status === 402) {
+        console.error("backend error:", backendCode, backendMessage);
         return {
           status: 0,
           code: "CU106",
           label: i18n("CU106_label"),
-          message: i18n("CU106_message"),
+          message: backendMessage || i18n("CU106_message"),
         };
-      } else {
-        // other server error — surface the backend message if one was parsed
-        if (backendMessage) {
-          console.error("server error:", backendCode, backendMessage);
-          return {
-            status: 0,
-            code: "CU107",
-            label: i18n("CU107_label"),
-            message: backendMessage,
-          };
-        }
-        console.error("server error:", response);
+      }
+      // other server error — surface the backend message if one was parsed
+      if (backendMessage) {
+        console.error("server error:", backendCode, backendMessage);
         return {
           status: 0,
           code: "CU107",
           label: i18n("CU107_label"),
-          message: i18n("CU107_message"),
+          message: backendMessage,
         };
       }
+      console.error("server error:", backendCode, backendMessage, response);
+      return {
+        status: 0,
+        code: "CU107",
+        label: i18n("CU107_label"),
+        message: backendMessage || i18n("CU107_message"),
+      };
     }
 
-    // payment was successful
     return {
       status: 1,
       label: i18n("access_granted_title"),
-      message: i18n("access_granted_subtitle", { purchased: allocation }),
+      // Normal flow: report the granted allocation. Bypass ("submit anyway")
+      // flow: the token wasn't validated client-side (e.g. a v2 short-keyset
+      // token), so there is no allocation to report — the merchant authorised
+      // the spend directly, confirmed by the 2xx.
+      message: allocation
+        ? i18n("access_granted_subtitle", { purchased: allocation })
+        : i18n("submit_anyway_granted_message"),
     };
   } catch (error) {
-    // catch and report unexpected errors
     console.error("error sending token:", error);
     return {
       status: 0,

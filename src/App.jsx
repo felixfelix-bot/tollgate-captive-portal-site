@@ -7,13 +7,13 @@ import classNames from 'classnames';
 import Background from './components/Background.jsx'
 import Cashu from './components/Cashu.jsx'
 import Lightning from './components/Lightning.jsx'
-import { BalancePage } from './components/BalancePage.jsx'
 import { Error } from './components/Status.jsx';
 import DemoBanner from './components/DemoBanner.jsx';
 import { AccessGrantedIcon, RadioButtonIcon, ErrorIcon } from './components/Icon.jsx'
 
 // helpers
-import { fetchTollgateData, getStepSizeValues, getTollgateBaseUrl } from './helpers/tollgate.js'
+import { fetchTollgateData, getStepSizeValues, getTollgateBaseUrl, getPortalBaseUrl } from './helpers/tollgate.js'
+import { probeLightningCapability } from './helpers/lightning.js'
 
 // styles and assets
 import './App.scss'
@@ -30,7 +30,20 @@ export const App = () => {
   const [error, setError] = useState(false);
   const [deviceInfo, setDeviceInfo] = useState(null);
   const [retrying, setRetrying] = useState(false);
+  const [lightningAvailable, setLightningAvailable] = useState(null);
   const retryIntervalRef = useRef(null);
+
+  // probe the backend once for lightning support; the tab stays disabled until
+  // the probe confirms the gateway exposes a working /ln-invoice endpoint
+  useEffect(() => {
+    let active = true;
+    probeLightningCapability().then((result) => {
+      if (active) setLightningAvailable(!!result.supported);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // initial data fetch on translation ready
   useEffect(() => {
@@ -108,8 +121,7 @@ export const App = () => {
 
             <div className="tollgate-captive-portal-tabs" aria-label={t('tab_aria_label')} data-hidden={!loading && !!error}>
               <Tab type="cashu" method={method} setMethod={setMethod} />
-              <Tab type="balance" method={method} setMethod={setMethod} />
-              <Tab type="lightning" method={method} setMethod={setMethod} />
+              <Tab type="lightning" method={method} setMethod={setMethod} available={lightningAvailable} />
             </div>
 
             <div className="tollgate-captive-portal-view">
@@ -131,10 +143,9 @@ export const App = () => {
                 </div>}
               </div>}
 
-              {/* show cashu, lightning, or the balance page based on selection */}
+              {/* show cashu or lightning based on selection */}
               {!loading && !error && method === 'cashu' && <Cashu tollgateDetails={tollgateDetails.value} />}
               {!loading && !error && method === 'lightning' && <Lightning tollgateDetails={tollgateDetails.value} />}
-              {!loading && !error && method === 'balance' && <BalancePage tollgateDetails={tollgateDetails.value} onNavigate={setMethod} />}
             </div>
 
           </div>
@@ -157,10 +168,11 @@ export const Header = () => {
 }
 
 // tab component for the container header
-const Tab = ({ type, method, setMethod }) => {
+const Tab = ({ type, method, setMethod, available }) => {
   const { t } = useTranslation();
   const isLightning = type === 'lightning';
-  const isDisabled = isLightning; // Lightning is disabled
+  // lightning is gated on the backend capability probe (null = still probing)
+  const isDisabled = isLightning && available !== true;
 
   return <button
     onClick={() => !isDisabled && setMethod(type)}
@@ -171,7 +183,7 @@ const Tab = ({ type, method, setMethod }) => {
     id={`tab-${type}`}
     aria-controls={`tab-${type}`}
     disabled={isDisabled}>
-    {isLightning ? `${t(`${type}_tab`)} (Coming Soon)` : t(`${type}_tab`)}
+    {isLightning && available === false ? `${t(`${type}_tab`)} (${t('lightning_unavailable')})` : t(`${type}_tab`)}
   </button>
 }
 
@@ -198,10 +210,12 @@ export const Processing = ({ label }) => {
 }
 
 // shows access granted message if payment succeeded
-export const AccessGranted = ({ allocation }) => {
+export const AccessGranted = ({ allocation, metric, onRenew }) => {
   const { t } = useTranslation();
   const [authCompleted, setAuthCompleted] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
+  const [liveUsage, setLiveUsage] = useState(null);
+  const [usageUnreachable, setUsageUnreachable] = useState(false);
 
   // Auto-submit the auth form via fetch to complete captive portal authentication.
   // Using fetch instead of form.submit() intercepts the redirect to '/' so the
@@ -224,30 +238,61 @@ export const AccessGranted = ({ allocation }) => {
   // (if still open) gives no feedback — the user sees mysterious connection errors.
   //
   // We poll the /usage endpoint (always reachable on port 2121 even for
-  // unauthenticated clients). It returns "used/total" while the session is
-  // active, and "-1/-1" when the session has expired. After 2 consecutive
-  // failures we show a SessionExpired view telling the user to reconnect.
+  // unauthenticated clients — which is exactly why an expired session can buy
+  // more time right here, without a Wi-Fi disconnect/reconnect). It returns
+  // "used/total" while the session is active, and "-1/-1" once the backend no
+  // longer knows the session.
+  //
+  // The two failure signals are deliberately kept apart:
+  //   * a "-1/-1" body is DEFINITIVE — 2 consecutive readings declare expiry;
+  //   * a transport/HTTP error is INDETERMINATE — the merchant API may just be
+  //     momentarily unreachable, so it never declares expiry (it only raises the
+  //     notice below) and polling continues.
+  // On expiry the interval is cleared (no leaked timer) and the view the user
+  // lands on is actionable: SessionExpired hands control back to the purchase
+  // flow in page.
   useEffect(() => {
-    if (!authCompleted) return;
+    if (!authCompleted || sessionExpired) return;
 
+    let expiredReadings = 0;
     let failures = 0;
     let cancelled = false;
 
     const heartbeat = setInterval(async () => {
       if (cancelled) return;
+
+      let text;
       try {
         const resp = await fetch(`${getTollgateBaseUrl()}/usage`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const text = await resp.text();
-        if (text.includes('-1/-1')) {
-          throw new Error('session not found');
-        }
-        failures = 0;
+        text = await resp.text();
       } catch {
+        // indeterminate: an unreachable merchant API is not an expired session
         failures++;
-        if (failures >= 2) {
+        expiredReadings = 0;
+        if (failures >= 2) setUsageUnreachable(true);
+        return;
+      }
+
+      failures = 0;
+      setUsageUnreachable(false);
+
+      if (text.includes('-1/-1')) {
+        expiredReadings++;
+        if (expiredReadings >= 2) {
           setSessionExpired(true);
           clearInterval(heartbeat);
+        }
+        return;
+      }
+
+      expiredReadings = 0;
+      const parts = text.trim().split('/');
+      if (parts.length === 2) {
+        const used = Number(parts[0]);
+        const total = Number(parts[1]);
+        if (!isNaN(used) && !isNaN(total) && total > 0 && used >= 0) {
+          setLiveUsage({ used, total, remaining: total - used });
         }
       }
     }, 30000); // check every 30s
@@ -256,17 +301,32 @@ export const AccessGranted = ({ allocation }) => {
       cancelled = true;
       clearInterval(heartbeat);
     };
-  }, [authCompleted]);
+  }, [authCompleted, sessionExpired]);
+
+  // Buy more time, in page. The merchant API on :2121 answers unauthenticated
+  // clients (see the heartbeat comment above), so renewing needs NEITHER a
+  // reload/navigation NOR a Wi-Fi disconnect: drop the expired state, stop the
+  // heartbeat and hand control back to the payment method, which re-renders its
+  // token/purchase UI.
+  const handleBuyMoreTime = () => {
+    setSessionExpired(false);
+    setLiveUsage(null);
+    setUsageUnreachable(false);
+    setAuthCompleted(false); // the session is gone — nothing left to poll
+    if (typeof onRenew === 'function') onRenew();
+  };
 
   if (sessionExpired) {
-    return <SessionExpired />;
+    return <SessionExpired onBuyMoreTime={handleBuyMoreTime} />;
   }
 
-  // build the persistent portal balance URL from the gateway host
-  const balanceUrl = `${getTollgateBaseUrl()}/portal`;
+  // build the persistent standalone balance-page URL from the gateway host.
+  // the balance page is served by the portal on :2051 (not the :2121 backend,
+  // which has no /portal route).
+  const balanceUrl = `${getPortalBaseUrl()}/balance.html`;
 
   return <div className="tollgate-captive-portal-access-granted">
-    <div className="tollgate-captive-portal-access-granted-checkmark">
+    <div id="captive-portal-access-granted-checkmark" className="tollgate-captive-portal-access-granted-checkmark">
       <AccessGrantedIcon />
     </div>
     <div className="tollgate-captive-portal-access-granted-label">
@@ -278,10 +338,49 @@ export const AccessGranted = ({ allocation }) => {
         <span className="tollgate-captive-portal-access-granted-duration-label">
           {t('access_duration_label')}
         </span>
+        {/* explicit separator: JSX drops the whitespace between the two spans
+            and these classes have no stylesheet rule, which rendered the
+            label and the value glued together ("Access purchased21.00 MiB") */}
+        {' '}
         <span className="tollgate-captive-portal-access-granted-duration-value">
           {allocation}
         </span>
       </div>
+
+      {/* live usage display — updates every 30s from GET /usage */}
+      {liveUsage && (() => {
+        const pct = Math.min(100, Math.round((liveUsage.used / liveUsage.total) * 100));
+        const remainingPct = 100 - pct;
+        const fmtValue = (v) => {
+          if (metric === 'milliseconds') {
+            if (v >= 3600000) return Math.round(v / 3600000) + ' hours';
+            if (v >= 60000) return Math.round(v / 60000) + ' min';
+            return Math.round(v / 1000) + ' sec';
+          }
+          if (v < 1024) return `${v} B`;
+          if (v < 1048576) return `${(v / 1024).toFixed(1)} KiB`;
+          if (v < 1073741824) return `${(v / 1048576).toFixed(1)} MiB`;
+          return `${(v / 1073741824).toFixed(2)} GiB`;
+        };
+        return (
+          <div className="tollgate-captive-portal-access-granted-usage">
+            <div className="tollgate-captive-portal-access-granted-usage-bar">
+              <div className="tollgate-captive-portal-access-granted-usage-bar-fill" style={{ width: `${remainingPct}%` }} />
+            </div>
+            <div className="tollgate-captive-portal-access-granted-usage-text">
+              {fmtValue(liveUsage.remaining)} remaining of {fmtValue(liveUsage.total)}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* the usage poll could not reach the merchant API — say so instead of
+          pretending the session expired (it may well still be alive) */}
+      {usageUnreachable && <p
+        className="muted small tollgate-captive-portal-usage-unreachable"
+        data-testid="usage-unreachable">
+        {t('usage_unreachable_notice')}
+      </p>}
 
       {/* link to the persistent balance page so the user can return later */}
       <a
@@ -297,20 +396,30 @@ export const AccessGranted = ({ allocation }) => {
   </div>
 }
 
-// shown when the heartbeat detects the session has expired
-const SessionExpired = () => {
+// shown when the heartbeat detects the session has expired.
+//
+// The session can be renewed HERE: the merchant API on :2121 keeps answering
+// unauthenticated clients, so the portal needs no reload and the operator needs
+// no Wi-Fi disconnect/reconnect. Reconnecting is kept only as an optional
+// fallback hint, never as the required way back online.
+const SessionExpired = ({ onBuyMoreTime }) => {
   const { t } = useTranslation();
-  return <div className="tollgate-captive-portal-access-granted">
+  return <div
+    className="tollgate-captive-portal-access-granted tollgate-captive-portal-session-expired"
+    data-testid="session-expired">
     <div className="tollgate-captive-portal-access-granted-checkmark">
       <ErrorIcon />
     </div>
     <div className="tollgate-captive-portal-access-granted-label">
       <h2>{t('session_expired_title')}</h2>
       <p>{t('session_expired_message')}</p>
-      <p className="small">{t('session_expired_hint')}</p>
-      <button className="cta" onClick={() => window.location.reload()}>
-        {t('session_expired_reconnect')}
+      <button
+        className="cta tollgate-captive-portal-session-expired-buy-more"
+        data-testid="buy-more-time"
+        onClick={onBuyMoreTime}>
+        {t('session_expired_buy_more')}
       </button>
+      <p className="small tollgate-captive-portal-session-expired-hint">{t('session_expired_hint')}</p>
     </div>
   </div>
 }
