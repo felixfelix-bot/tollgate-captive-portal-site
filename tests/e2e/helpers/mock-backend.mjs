@@ -37,7 +37,12 @@ export async function setupMockBackend(page, options = {}) {
     usageResponse = '60000/600000',
     usageExpired = false,
     usageHang = false,
+    metricOverride = null,
   } = options;
+
+  const details = metricOverride
+    ? { ...MOCK_TOLLGATE_DETAILS, tags: MOCK_TOLLGATE_DETAILS.tags.map(t => t[0] === 'metric' ? ['metric', metricOverride] : t) }
+    : MOCK_TOLLGATE_DETAILS;
 
   await page.route('**/*', async (route, request) => {
     const url = new URL(request.url());
@@ -71,7 +76,7 @@ export async function setupMockBackend(page, options = {}) {
         return route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify(MOCK_TOLLGATE_DETAILS),
+          body: JSON.stringify(details),
         });
       }
       if (path === '/usage') {
@@ -101,6 +106,29 @@ export async function setupMockBackend(page, options = {}) {
             allotment: 600000,
             start_time: 1,
           }),
+        });
+      }
+      if (path === '/ln-invoice') {
+        // capability probe is a GET without a quote; a real purchase is a POST
+        if (method === 'POST') {
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              status: 1,
+              quote: 'test-quote',
+              invoice: 'lnbc1mockinvoice',
+              mint_url: 'https://mint.minibits.cash/Bitcoin',
+              amount: 210,
+              expiry: 0,
+              state: 'UNPAID',
+            }),
+          });
+        }
+        return route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 0, error: 'quote is required' }),
         });
       }
     }
