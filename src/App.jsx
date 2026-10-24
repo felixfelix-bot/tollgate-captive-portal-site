@@ -8,12 +8,13 @@ import Background from './components/Background.jsx'
 import Cashu from './components/Cashu.jsx'
 import Lightning from './components/Lightning.jsx'
 import { BalancePage } from './components/BalancePage.jsx'
+import { BalanceWidget } from './components/BalanceWidget.jsx'
 import { Error } from './components/Status.jsx';
 import DemoBanner from './components/DemoBanner.jsx';
 import { AccessGrantedIcon, RadioButtonIcon, ErrorIcon } from './components/Icon.jsx'
 
 // helpers
-import { fetchTollgateData, getStepSizeValues, getTollgateBaseUrl } from './helpers/tollgate.js'
+import { fetchTollgateData, getAccessOptions, getStepSizeValues, getTollgateBaseUrl } from './helpers/tollgate.js'
 
 // styles and assets
 import './App.scss'
@@ -94,6 +95,14 @@ export const App = () => {
     };
   }, [error, tollgateDetails]);
 
+  // the best (cheapest per step) access option, used by the balance widget to
+  // price the sats-spent estimate. getAccessOptions returns an error object
+  // when the tollgate details are malformed — treat that as "no pricing".
+  const accessOptions = tollgateDetails?.value?.detailsEvent
+    ? getAccessOptions(tollgateDetails.value.detailsEvent, t)
+    : [];
+  const accessOption = Array.isArray(accessOptions) ? accessOptions[0] || null : null;
+
   // main render
   return (
     <div id="tollgate-captive-portal" className="tollgate-captive-portal">
@@ -105,6 +114,12 @@ export const App = () => {
 
         <div className="tollgate-captive-portal-content">
           <div className="tollgate-captive-portal-content-container">
+
+            {/* the device's live internet balance — renders itself only when
+                the backend reports an active session. It sits ABOVE the tab
+                view, so it stays visible through the Access Granted state as
+                well; the granted view must not mount a second copy. */}
+            {!loading && !error && <BalanceWidget accessOption={accessOption} />}
 
             <div className="tollgate-captive-portal-tabs" aria-label={t('tab_aria_label')} data-hidden={!loading && !!error}>
               <Tab type="cashu" method={method} setMethod={setMethod} />

@@ -1,0 +1,76 @@
+/**
+* Balance widget styles.
+*
+* TASK B (DESIGN-2): the widget is a card whose TOP-LEFT and TOP-RIGHT corners
+* are rounded (--border-radius-large). The bottom corners stay square so the
+* card reads as a header cap sitting above the page content.
+*
+* The radius is applied to the header itself and the outer card is clipped
+* (overflow: hidden), which keeps the coloured header flush with the rounded
+* corners instead of leaking a square background behind them.
+**/
+
+.balance-widget {
+  width: 100%;
+  border: var(--border-width) solid var(--color-green);
+  background-color: var(--color-green-transparent);
+  color: var(--color-white);
+  // clip the header's rounded top corners against the card edge
+  overflow: hidden;
+
+  &-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.8rem 1rem;
+    background-color: var(--color-green);
+    font-weight: 600;
+    // DESIGN-2: only the top corners are rounded
+    border-top-left-radius: var(--border-radius-large);
+    border-top-right-radius: var(--border-radius-large);
+  }
+
+  &-label {
+    margin: 0;
+    font-size: var(--font-size-small);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  &-remaining {
+    margin: 0;
+    font-size: var(--font-size-large);
+    font-weight: 700;
+    text-align: right;
+  }
+
+  &-body {
+    display: flex;
+    flex-direction: column;
+    border-top: var(--border-width) solid var(--color-white);
+  }
+
+  &-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.5rem 1rem;
+
+    & + & {
+      border-top: 0.1rem solid var(--color-white-transparent);
+    }
+  }
+
+  &-row-label {
+    font-size: var(--font-size-small);
+    opacity: 0.85;
+  }
+
+  &-row-value {
+    font-size: var(--font-size);
+    font-weight: 600;
+    text-align: right;
+  }
+}

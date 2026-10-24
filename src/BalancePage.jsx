@@ -19,10 +19,7 @@ const StatCard = ({ label, value, detail }) => {
   </div>;
 };
 
-const formatDisplayValue = (amount, metric, i18n) => {
-  const formatted = formatMetricValue(amount, metric, i18n);
-  return `${formatted.value} ${formatted.unit}`.trim();
-};
+const formatDisplayValue = (amount, metric) => formatMetricValue(amount, metric);
 
 const BalancePage = () => {
   const { t, ready } = useTranslation();
