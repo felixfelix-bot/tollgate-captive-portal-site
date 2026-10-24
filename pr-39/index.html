@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="/tollgate-captive-portal-site/pr-39/favicon.ico" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+    />
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="Tollgate Captive Portal" />
+    <!--
+      CSP. `connect-src` must cover BOTH schemes deliberately:
+        - `http:` / `ws:` — the portal itself is served over plain HTTP on the
+          router's LAN IP, and the TollGate API lives on that same non-secure
+          origin.
+        - `https:` — every Cashu mint the wallet talks to (NUT-06/nUT-07 keyset
+          and fee calls, e.g. https://mint.minibits.cash). CSP scheme-sources
+          are SCHEME-EXACT: `http:` does not match an `https:` URL. Without
+          `https:` the mint fee pre-check is blocked, getMintSwapFee silently
+          falls back to {status: 0}, and the CU110 "token entirely eaten by the
+          fee" guard never fires — the failure mode src/helpers/mint-fee.js
+          says must never happen.
+      `worker-src` is intentionally unset: it falls back to `default-src 'self'`,
+      which is correct for a same-origin service worker. NOTE that the CSP is
+      NOT what blocks a service worker here — the missing secure context is
+      (see docs/architecture/pwa-client-wallet-adr-delta.md §3).
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http: https: ws: wss:; font-src 'self' data:; media-src 'self';" />
+    <link rel="apple-touch-icon" href="/tollgate-captive-portal-site/pr-39/logo192.png" />
+    <link rel="manifest" href="/tollgate-captive-portal-site/pr-39/manifest.json" />
+    <title>Tollgate Captive Portal</title>
+    <!--
+      TIP-03 prehydrate: read ?token= BEFORE the SPA bundle downloads so the
+      payment flow can start without waiting for React to mount. Also strips
+      the token from the URL immediately (Cashu tokens are bearer instruments
+      and would otherwise leak via browser history, server logs, and Referer
+      headers on any subsequent navigation).
+      Matches the curl-equivalent path used by `pay_direct()` in the test
+      framework: the SPA reads this global synchronously on first render.
+    -->
+    <script>
+      (function () {
+        try {
+          var params = new URLSearchParams(window.location.search);
+          var token = params.get('token');
+          if (token) {
+            window.__INITIAL_TOKEN__ = token;
+            // Strip the bearer token from the address bar (security)
+            var clean = window.location.pathname + window.location.hash;
+            window.history.replaceState({}, document.title, clean);
+          }
+        } catch (e) {
+          // URLSearchParams or history API may be unavailable in very old
+          // embedded WebViews — fail silently, the SPA will fall through
+          // to the manual token-entry UI.
+        }
+      })();
+    </script>
+    <script type="module" crossorigin src="/tollgate-captive-portal-site/pr-39/assets/portal-DkG2INQA.js"></script>
+    <link rel="modulepreload" crossorigin href="/tollgate-captive-portal-site/pr-39/assets/index-C55OA8hI.js">
+    <link rel="stylesheet" crossorigin href="/tollgate-captive-portal-site/pr-39/assets/index-CSbRLgwZ.css">
+  </head>
+  <body>
+    <noscript>
+      <div style="font-family: system-ui, sans-serif; max-width: 480px; margin: 2rem auto; padding: 1.5rem; background: #0a0a0a; color: #fff; border-radius: 0.5rem;">
+        <h2 style="margin-top: 0;">JavaScript Required</h2>
+        <p style="color: #888;">This portal requires JavaScript to process Cashu payments.</p>
+        <p style="color: #888;">If your browser doesn't support JavaScript, you can pay directly from a terminal:</p>
+        <pre style="background: #111; padding: 0.75rem; border-radius: 0.25rem; overflow-x: auto; font-size: 0.8rem; color: #0f0;">curl -X POST -d 'YOUR_CASHU_TOKEN' http://192.168.1.1:2121/</pre>
+      </div>
+    </noscript>
+    <div id="root"></div>
+  </body>
+</html>

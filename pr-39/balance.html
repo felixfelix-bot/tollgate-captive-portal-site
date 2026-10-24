@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="/tollgate-captive-portal-site/pr-39/favicon.ico" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+    />
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="Tollgate Balance" />
+    <!--
+      balance.html accepts a pasted Cashu token, so it needs the SAME CSP as
+      index.html. It previously shipped none at all — the one entry point on
+      the portal with no policy, on the page that handles a bearer instrument.
+      Kept byte-for-byte equivalent to index.html's policy on purpose: two
+      policies that drift are how a hole gets opened in one of them.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http: https: ws: wss:; font-src 'self' data:; media-src 'self';" />
+    <link rel="apple-touch-icon" href="/tollgate-captive-portal-site/pr-39/logo192.png" />
+    <link rel="manifest" href="/tollgate-captive-portal-site/pr-39/manifest.json" />
+    <title>Tollgate Balance</title>
+    <script type="module" crossorigin src="/tollgate-captive-portal-site/pr-39/assets/balance-C8YKuVuj.js"></script>
+    <link rel="modulepreload" crossorigin href="/tollgate-captive-portal-site/pr-39/assets/index-C55OA8hI.js">
+    <link rel="stylesheet" crossorigin href="/tollgate-captive-portal-site/pr-39/assets/index-CSbRLgwZ.css">
+    <link rel="stylesheet" crossorigin href="/tollgate-captive-portal-site/pr-39/assets/balance-5KSP87Gz.css">
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+  </body>
+</html>
