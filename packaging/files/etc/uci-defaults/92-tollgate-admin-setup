@@ -1,0 +1,526 @@
+#!/bin/sh
+# TollGate admin board setup: create/repair the dedicated uhttpd instance that
+# serves the admin SPA, and make sure rpcd (which serves the `tollgate` ubus
+# object) is running.
+#
+# ─── the MODE-AWARE mapping (D2/D3)
+#
+# (docs/architecture/default-ui-and-entry-port-decision.md in the module repo)
+#
+# This instance, uhttpd.admin, owns ONE of the two admin port pairs, decided by
+# the SAME `entry_ui` switch the module's 99-tollgate-setup reads:
+#
+#   entry_ui   entry pair            secondary pair        uhttpd.admin binds
+#   board      board (8080 + 443)    LuCI  (8090 + 8443)   8080 + 443
+#   luci       LuCI  (8080 + 443)    board (8090 + 8443)   8090 + 8443  (today)
+#
+# The port SETS never change, only which UI answers on each (D2). `entry_ui` is
+# the flat field of /etc/tollgate/config.json, read with jq; a missing file, a
+# missing key, an empty or unparseable value, or an ABSENT jq all resolve to
+# `board` (D1), and no value may ever resolve to "bind no admin listener at all"
+# (invariant 6 — a router whose switch cannot be read still answers on a pair).
+#
+# One writer per section (D3): THIS script is the only writer of uhttpd.admin —
+# it is the only writer that knows the brand webroot — and the module's 99 is
+# the only writer of uhttpd.main. Neither decides the mapping alone: both
+# compute it from the same value. This script therefore BINDS only the pair it
+# owns and STRIPS that pair from every other section, so no port is ever claimed
+# by two instances (invariant 3: one binder per port).
+#
+# ─── the D4 marker: the atomicity boundary across the two packages
+#
+# The two halves arrive through different installers (the module's postinst runs
+# 90/99; the feed's recipe brings 92) while at boot the numeric order is
+# 90, 92, 99. A router carrying a new 99 and a pre-switch 92 would have both
+# sections claiming one pair, and the loser does not start — an admin UI
+# disappears. So this script announces the mapping protocol by writing
+#
+#   /etc/tollgate/entry-ui-mapping      (override: TOLLGATE_ENTRY_UI_MARKER)
+#
+# whose CONTENT is the resolved value (`board` or `luci`) and whose EXISTENCE
+# means "the mode-aware 92 is installed". The module's 99 honours entry_ui=board
+# ONLY when that marker is present and carries `board`; without it, 99 repairs
+# to the legacy `luci` mapping, logs one WARNING naming the feed re-vendor, and
+# leaves the operator's switch recorded for the release that carries both
+# halves. The marker is written on every COMPLETED run — and deliberately NOT by
+# the refuse-to-serve path below, so a router whose board is off the air does
+# not advertise a mapping whose entry pair nothing answers.
+#
+# Rollout (D4): the module half may ship the `board` default only in a release
+# whose feed pin (vendor.lock.json `portal_commit` / the feed recipe's
+# PKG_SOURCE_VERSION) carries THIS script — the feed is the atomicity boundary.
+# A module-only release ships the switch with the default still `luci`, which is
+# a behaviour no-op; a module release that defaulted to `board` against a
+# pre-switch 92 is the torn pair the marker gate above exists to prevent.
+#
+# ─── webroot, scheme, and the anti-LuCI guard
+#
+# The admin SPA is served at the ROOT of the pair this instance owns from its
+# BRAND webroot (/www/<brand>; the generic default is /www/tollgate). The
+# packaging build substitutes __ADMIN_HOME__ for the brand it builds (see the
+# feed Makefile), so a build can never point at a leftover webroot from another
+# brand. Do NOT guess the webroot by directory existence.
+#
+# Scheme: the board answers on the pair's plain-HTTP port and, when an identity
+# exists, on its TLS port — one uhttpd instance cannot serve HTTP and HTTPS on
+# the SAME port (bind: Address already in use), so the URL people type stays
+# bound to its HTTP port. That port then REDIRECTS to the TLS port, so the
+# board's login form is never typed on a cleartext origin — but only while the
+# TLS listener carries an identity that COVERS this router. The identity is the
+# MODULE's provisioned certificate (below); the image's placeholder pair keeps a
+# listener alive at most, and never arms the hop. Never advertise a TLS listener
+# without a cert — uhttpd would fail to start it.
+#
+# The other pair is the module's (LuCI on uhttpd.main by default); the captive
+# portal is uhttpd.portal (:2051). Both ports of the pair THIS instance owns
+# belong to it ALONE, so they are removed from any other section.
+#
+# The admin instance must NEVER expose LuCI. With home=/www/<brand>, a request to
+# /cgi-bin/luci resolves to /www/<brand>/cgi-bin/luci (absent) -> 404 ->
+# error_page (/index.html = the board). This is why home must never be /www:
+# with home=/www, uhttpd's default cgi_prefix=/cgi-bin served the real LuCI CGI on
+# the admin port (see the MT3000 incident, 2026-09-20). The cgi/lua prefixes are
+# deleted outright as belt-and-braces.
+#
+# Idempotent: creates the section if missing, ALWAYS re-asserts every option, so
+# it also repairs the older home=/www + /tollgate/ scheme, a stale
+# HTTPS-only admin port left behind by an earlier build, and a stale copy of
+# either pair left on the other section.
+
+# ─── entry_ui: the shared switch, the two pairs, and the D4 marker ────────────
+#
+# The value is read from the module's own config file (the flat `entry_ui`
+# field), through jq, exactly as the module's 99-tollgate-setup reads it — one
+# value, two readers, so neither half decides the mapping on its own (D3). Every
+# failure mode resolves toward the operator's decision (board) rather than
+# toward "no admin listener" (invariant 6).
+#
+# These paths are env-overridable in the same style as TOLLGATE_SHADOW_FILE
+# below, so the offline packaging tests can point them into a private temp dir.
+TOLLGATE_CONFIG_JSON="${TOLLGATE_CONFIG_JSON:-/etc/tollgate/config.json}"
+TOLLGATE_ENTRY_UI_MARKER="${TOLLGATE_ENTRY_UI_MARKER:-/etc/tollgate/entry-ui-mapping}"
+
+entry_ui_resolved() {
+    local v=""
+    if [ -r "$TOLLGATE_CONFIG_JSON" ] && command -v jq >/dev/null 2>&1; then
+        v=$(jq -r '.entry_ui // empty' "$TOLLGATE_CONFIG_JSON" 2>/dev/null) || v=""
+    fi
+    case "$v" in
+        board|luci) printf '%s\n' "$v" ;;
+        *) printf 'board\n' ;;
+    esac
+}
+ENTRY_UI=$(entry_ui_resolved)
+
+# The two pairs, as literals (D2). BOARD_* is the ENTRY pair and SEC_* the
+# SECONDARY pair; which section binds which is decided below, from ENTRY_UI.
+BOARD_HTTP='0.0.0.0:8080'; BOARD_HTTP6='[::]:8080'
+BOARD_HTTPS='0.0.0.0:443'; BOARD_HTTPS6='[::]:443'
+SEC_HTTP='0.0.0.0:8090';   SEC_HTTP6='[::]:8090'
+SEC_HTTPS='0.0.0.0:8443';  SEC_HTTPS6='[::]:8443'
+
+# The pair THIS instance binds, and the hex form of the TLS port it actually
+# owns (0x01BB = 443, 0x20FB = 8443, for the /proc/net/tcp fail-open probe).
+case "$ENTRY_UI" in
+    luci)
+        # Today's mapping: LuCI owns the entry pair, the board the secondary one.
+        ADMIN_HTTP="$SEC_HTTP";   ADMIN_HTTP6="$SEC_HTTP6"
+        ADMIN_HTTPS="$SEC_HTTPS"; ADMIN_HTTPS6="$SEC_HTTPS6"
+        ADMIN_TLS_RE=':20FB'; MAIN_TLS_RE=':01BB'
+        ;;
+    *)
+        # board — the default: the board owns the entry pair.
+        ADMIN_HTTP="$BOARD_HTTP";   ADMIN_HTTP6="$BOARD_HTTP6"
+        ADMIN_HTTPS="$BOARD_HTTPS"; ADMIN_HTTPS6="$BOARD_HTTPS6"
+        ADMIN_TLS_RE=':01BB'; MAIN_TLS_RE=':20FB'
+        ;;
+esac
+
+# ─── FAIL CLOSED: never serve the board against an unset root credential ─────
+#
+# rpcd's login check (rpcd/session.c, rpc_login_test_password) starts with
+#
+#     /* password is not set */
+#     if (!hash || !*hash) { return true; }
+#
+# and the distribution's /etc/config/rpcd sets the login password to `$p$root`,
+# i.e. getspnam("root")->sp_pwdp. So while root's /etc/shadow hash is EMPTY —
+# the state a fresh OpenWrt ships in, and the state a deploy that was not given
+# a password used to be left in — ubus session.login accepts ANY password,
+# including the empty string, and the session it returns carries this board's
+# ACL (file exec, system.password_set, wallet_drain_cashu). An admin board in
+# that state is not a login, it is unauthenticated root administration.
+#
+# States:
+#   set    - a real hash: only the real password matches. Serve.
+#   locked - '!' / '*' : crypt() can never match, so no one can authenticate
+#            with a password. Serving it cannot hand out a session. Serve.
+#   empty  - no hash at all: ANY password authenticates. Do NOT serve.
+#   unknown- unreadable (no awk, no /etc/shadow): never assume it is safe.
+#
+# Refusing means: the admin listeners are removed (an already-deployed router
+# converges too, in either mapping). The owner sets a root password — `passwd root` over
+# SSH or LuCI, or the installer now always establishes one — and re-running this
+# script (any install/upgrade of the package) restores the board, because the
+# listener block below always re-asserts the options from scratch.
+SHADOW_FILE="${TOLLGATE_SHADOW_FILE:-/etc/shadow}"
+
+root_hash_state() {
+    local h
+    h=$(awk -F: '$1=="root"{print $2}' "$SHADOW_FILE" 2>/dev/null)
+    case "$h" in
+        "")        echo empty ;;
+        '!'*|'*'*) echo locked ;;
+        ?*)        echo set ;;
+        *)         echo unknown ;;
+    esac
+}
+
+ROOT_CRED_STATE=$(root_hash_state)
+ADMIN_BOARD_ALLOWED=1
+case "$ROOT_CRED_STATE" in
+    set|locked) ;;
+    *)
+        ADMIN_BOARD_ALLOWED=0
+        echo "WARNING: the TollGate admin board ($ADMIN_HTTP/$ADMIN_HTTPS) is NOT being served:" >&2
+        echo "WARNING:   root has no usable password (state: $ROOT_CRED_STATE)." >&2
+        echo "WARNING:   rpcd's session.login accepts ANY password while root's" >&2
+        echo "WARNING:   /etc/shadow hash is unset, so a session would prove nothing." >&2
+        echo "WARNING:   Set one with 'passwd root' (SSH or LuCI), then re-run this" >&2
+        echo "WARNING:   setup (reinstall/upgrade the package) to enable the board." >&2
+        ;;
+esac
+
+# Brand webroot. __ADMIN_HOME__ is substituted at package build time
+# (/www/<brand>, e.g. /www/tollgate for the generic default build). Fall back to
+# the default webroot if a build forgot to substitute it.
+ADMIN_HOME="__ADMIN_HOME__"
+case "$ADMIN_HOME" in
+  *__ADMIN_HOME__*|"") ADMIN_HOME="/www/tollgate" ;;
+esac
+
+# The two certificate pairs that can end up on the board's TLS listener.
+#
+#   TOLLGATE_SSL_CERT/KEY  the identity the MODULE provisions for THIS router
+#                          (`tollgate ssl apply`, driven by the module's
+#                          packaging/files/etc/uci-defaults/99-tollgate-setup),
+#                          with this router's hostname, <hostname>.lan alias and
+#                          LAN IP in its SANs. It is the only pair a browser can
+#                          validate here, and the module owns it: this script
+#                          consumes it and never generates one.
+#   IMAGE_CERT/KEY         the OpenWrt image's own pair, a PLACEHOLDER (subject
+#                          CN=OpenWrt, SAN DNS:OpenWrt). Usable as a fallback
+#                          LISTENER identity, so a router that could not be
+#                          provisioned keeps its TLS listener instead of
+#                          losing it — never as an identity to send a browser to.
+#                          It is never a redirect target: only the MODULE's
+#                          identity arming this listener can arm the hop below.
+#
+# Both are env-overridable so the offline packaging tests can point them at a
+# private temp dir, exactly like TOLLGATE_SHADOW_FILE above.
+TOLLGATE_SSL_CERT="${TOLLGATE_SSL_CERT:-/etc/tollgate/ssl/server.crt}"
+TOLLGATE_SSL_KEY="${TOLLGATE_SSL_KEY:-/etc/tollgate/ssl/server.key}"
+IMAGE_CERT="${UHTTPD_IMAGE_CERT:-/etc/uhttpd.crt}"
+IMAGE_KEY="${UHTTPD_IMAGE_KEY:-/etc/uhttpd.key}"
+
+# Create or repair the admin instance.
+uci -q get uhttpd.admin >/dev/null 2>&1 || uci set uhttpd.admin=uhttpd
+uci -q delete uhttpd.admin.listen_http
+uci -q delete uhttpd.admin.listen_https
+if [ "$ADMIN_BOARD_ALLOWED" = "1" ]; then
+    uci add_list uhttpd.admin.listen_http="$ADMIN_HTTP"
+    uci add_list uhttpd.admin.listen_http="$ADMIN_HTTP6"
+    uci -q delete uhttpd.admin.cert
+    uci -q delete uhttpd.admin.key
+    # The provisioned identity FIRST — it is the one built to cover this router.
+    # The image's pair is the fallback listener identity only; which of the two
+    # is armed as a redirect target is decided further down, by the shared
+    # coverage predicate.
+    if [ -r "$TOLLGATE_SSL_CERT" ] && [ -s "$TOLLGATE_SSL_CERT" ] &&
+       [ -r "$TOLLGATE_SSL_KEY" ] && [ -s "$TOLLGATE_SSL_KEY" ]; then
+        admin_tls_cert="$TOLLGATE_SSL_CERT"
+        admin_tls_key="$TOLLGATE_SSL_KEY"
+    elif [ -r "$IMAGE_CERT" ] && [ -s "$IMAGE_CERT" ] &&
+         [ -r "$IMAGE_KEY" ] && [ -s "$IMAGE_KEY" ]; then
+        admin_tls_cert="$IMAGE_CERT"
+        admin_tls_key="$IMAGE_KEY"
+    else
+        admin_tls_cert=""
+        admin_tls_key=""
+    fi
+    if [ -n "$admin_tls_cert" ]; then
+        uci add_list uhttpd.admin.listen_https="$ADMIN_HTTPS"
+        uci add_list uhttpd.admin.listen_https="$ADMIN_HTTPS6"
+        uci set uhttpd.admin.cert="$admin_tls_cert"
+        uci set uhttpd.admin.key="$admin_tls_key"
+    fi
+else
+    # No listener at all while the router has no usable root credential: the
+    # board must be UNREACHABLE, not merely unhelpful. The deletes are repeated
+    # here (rather than relying on the pair above) so this branch alone is
+    # sufficient to take a router that ALREADY serves :8090/:8443 off the air.
+    uci -q delete uhttpd.admin.listen_http
+    uci -q delete uhttpd.admin.listen_https
+    uci -q delete uhttpd.admin.cert
+    uci -q delete uhttpd.admin.key
+    # ...and the derived hop goes with them: a section with no TLS listener has
+    # nothing a redirect could land on.
+    uci -q delete uhttpd.admin.redirect_https
+fi
+uci set uhttpd.admin.ubus_prefix='/ubus'
+uci set uhttpd.admin.script_timeout='60'
+uci set uhttpd.admin.network_timeout='30'
+uci set uhttpd.admin.max_requests='3'
+uci set uhttpd.admin.tcp_keepalive='1'
+uci set uhttpd.admin.no_dirlists='1'
+uci set uhttpd.admin.home="$ADMIN_HOME"
+uci set uhttpd.admin.error_page='/index.html'
+# Never let the admin port expose LuCI's /cgi-bin/luci via an explicit override.
+uci -q delete uhttpd.admin.cgi_prefix
+uci -q delete uhttpd.admin.lua_prefix
+
+# The pair THIS instance owns belongs to it ALONE — strip it from any other
+# section (a stale `uhttpd.luci`-style section, or the other instance still
+# carrying the pair from before a mode flip, must not own an admin port). The
+# OTHER pair is left untouched: it is the module's 99's to write (D3).
+for sec in $(uci show uhttpd 2>/dev/null | sed -n 's/^uhttpd\.\([^.]*\)=uhttpd$/\1/p'); do
+    [ "$sec" = "admin" ] && continue
+    for addr in "$ADMIN_HTTP" "$ADMIN_HTTP6" "$ADMIN_HTTPS" "$ADMIN_HTTPS6"; do
+        uci -q del_list "uhttpd.$sec.listen_http=$addr" 2>/dev/null
+        uci -q del_list "uhttpd.$sec.listen_https=$addr" 2>/dev/null
+    done
+done
+
+# Rebrand: a brand build must not serve a leftover skin from a foreign brand.
+# The packaging build substitutes __FOREIGN_SKINS__ with whitespace-separated
+# "<webroot>:<uhttpd-section>" tokens, one per OTHER known brand skin (e.g. the
+# generic default build lists the other vendors' webroots/sections, and a
+# branded build lists the generic + the remaining vendors). Each foreign uhttpd
+# section and webroot is dropped so only this brand's webroot can be served.
+# Falls back to no-op when a build forgot to substitute the list.
+FOREIGN="__FOREIGN_SKINS__"
+for skin in $FOREIGN; do
+    webroot="${skin%%:*}"
+    section="${skin##*:}"
+    [ -n "$webroot" ] && [ -n "$section" ] && [ "$webroot" != "$section" ] || continue
+    # Normalize trailing slashes first: /www/tollgate/ would otherwise slip past
+    # the self-deletion guard below (rm -rf /www/tollgate/ == /www/tollgate).
+    while [ "${webroot%/}" != "$webroot" ]; do
+        webroot="${webroot%/}"
+    done
+    # Never delete this build's own uhttpd section or webroot - a malformed
+    # token that lists the active brand would drop the board this script just
+    # installed (uci delete uhttpd.admin or rm -rf of its webroot).
+    [ "$section" = "admin" ] && continue
+    [ "$webroot" = "$ADMIN_HOME" ] && continue
+    # Only ever delete a brand webroot *under* /www: /www itself (or /www/,
+    # normalized above) is LuCI's webroot, and anything outside /www is not ours.
+    case "$webroot" in
+      /www/*) ;;
+      *) continue ;;
+    esac
+    uci -q delete "uhttpd.$section" 2>/dev/null
+    rm -rf "$webroot" 2>/dev/null
+done
+
+uci commit uhttpd
+
+# ─── D7: NO admin port in nodogsplash's pre-auth allow list ───────────────────
+#
+# The list says what an UNAUTHENTICATED captive client may reach ON THE ROUTER,
+# and an admin login is never one of them: the portal (:2050/:2051) is the
+# guest's answer, not a password field. Every admin surface is deliberately
+# absent — the packet filter drops both pairs on the captive bridge
+# (31-admin-board-not-guest-reachable.nft, 32-luci-not-guest-reachable.nft) and
+# the module's 99 removes LuCI's :8080/:443 from this list on its own path.
+#
+# This script used to ADD :8090/:8443 here on every install/upgrade. That was
+# the guest-reachable admin login #546/#566/#588 removed, and under the mapping
+# decision those ports are one UI's or the other's admin login in EVERY mode, so
+# :8080/:443 must never be on it either. The ADD block is gone.
+#
+# Why the REMOVAL lives here and not only in the module's 99: 99 reconciles the
+# allow list on its FULL setup pass (first boot / setup-version change), which an
+# apk upgrade SKIPS — so a router upgraded from a build whose 92 wrote
+# `allow tcp port 8090` would keep that entry. This script runs on every
+# install/upgrade, so it is the one that can take it back out.
+#
+# Section-guarded (the section may not exist yet, depending on install order),
+# and exact-value matches only, so a legitimate guest entry (the portal's
+# :2050/:2051, the backend API's :2121, udp/123) is never disturbed.
+if uci -q get nodogsplash.@nodogsplash[0] >/dev/null 2>&1; then
+    for port in 8080 443 8090 8443; do
+        uci -q del_list nodogsplash.@nodogsplash[0].users_to_router="allow tcp port $port" 2>/dev/null
+    done
+    uci commit nodogsplash
+fi
+
+# LuCI (uhttpd.main :8080) presents a login over plain HTTP, which browsers
+# flag as an insecure password field. Redirect it to the TLS listener when that
+# listener is real AND its identity covers this router; the board on :8090 is
+# redirected by the same rule, derived from the same predicate, just below.
+#
+# uhttpd.main.redirect_https is a DERIVED value, not a configured one. Two
+# conditions, both necessary, both checked here:
+#
+#   1. a TLS listener is actually configured on uhttpd.main. "A cert/key pair
+#      exists" is NOT a sufficient guard: uhttpd.main.listen_https is configured
+#      by the module's 99-tollgate-setup, which used to run a FULL setup pass only
+#      (first boot or a setup-version change) and skipped the uhttpd contract on
+#      an apk upgrade. A router whose certs appeared after its last full setup
+#      therefore had certs but no :443 listener, and enabling the redirect there
+#      sends every :8080 LuCI request to a dead port (the 2026-09-21 pre13 LuCI
+#      lockout). Condition 1 is what that incident added.
+#
+#   2. the identity on that listener COVERS the address a browser used to reach
+#      this router. Readable + non-empty is not coverage: the OpenWrt image ships
+#      a placeholder certificate (subject CN=OpenWrt, SAN DNS:OpenWrt, 561 bytes)
+#      that satisfies every existence check while covering neither the router's
+#      hostname nor its LAN IP. Measured on the bench MT3000 (pre17, 2026-09-26)
+#      before this change: callers were answered a 307 redirect to the TLS
+#      listener at the LAN IP, and the browser showed a hard certificate error on
+#      an identity it can never validate. Requiring coverage is what that
+#      incident added.
+#
+# Condition 2 delegates to the module's own x509 check - `tollgate ssl covers`,
+# src/cmd/tollgate-cli/ssl.go - so the shell, the Go side and a browser cannot
+# disagree about what a usable identity means (SAN validation via
+# x509.VerifyHostname; a CommonName with no SAN extension is deliberately not
+# coverage). The shell FAILS CLOSED: an absent or unusable CLI is "does not
+# cover", which keeps the hop off rather than pointing a browser at an identity
+# nobody checked.
+#
+# Always write an explicit value, so a stale '1' left by an earlier install is
+# repaired rather than kept.
+#
+# Keep this rule identical to the module's 99-tollgate-setup: both scripts write
+# uhttpd.main.redirect_https and install order decides which lands last (the
+# module's postinst runs 90, 99, 92 - so 92 lands last there; numeric
+# uci-defaults order at boot is 90, 92, 99 - so 99 lands last there). Two writers
+# that evaluate the same rule agree in either order; two writers with a premise
+# of their own are the defect. packaging/tests/test-redirect-https-single-rule.sh
+# fails if either script decides this value on its own.
+TOLLGATE_CLI="${TOLLGATE_CLI:-/usr/bin/tollgate}"
+
+cert_covers_router() {
+    [ -n "$1" ] || return 1
+    [ -x "$TOLLGATE_CLI" ] || return 1
+    "$TOLLGATE_CLI" ssl covers "$1" >/dev/null 2>&1
+}
+
+if uci -q get uhttpd.main >/dev/null 2>&1; then
+    main_cert=$(uci -q get uhttpd.main.cert 2>/dev/null)
+    main_key=$(uci -q get uhttpd.main.key 2>/dev/null)
+    if [ -n "$main_cert" ] && [ -r "$main_cert" ] && [ -s "$main_cert" ] &&
+       [ -n "$main_key" ] && [ -r "$main_key" ] && [ -s "$main_key" ] &&
+       [ -n "$(uci -q get uhttpd.main.listen_https 2>/dev/null)" ] &&
+       cert_covers_router "$main_cert"; then
+        uci set uhttpd.main.redirect_https='1'
+    else
+        uci set uhttpd.main.redirect_https='0'
+    fi
+    uci commit uhttpd
+fi
+
+# --- the BOARD's own listener: the same rule, the same predicate -------------
+#
+# The board's login form has the same problem LuCI's has — it is a password field
+# on a cleartext origin — so the pair's plain-HTTP port is redirected to the
+# instance's OWN TLS listener (443 in board mode, 8443 in luci) under exactly the
+# rule above:
+#
+#   1. a TLS listener is configured on uhttpd.admin (nothing to redirect to
+#      otherwise — uhttpd.main's :443 is a different instance and a different
+#      process),
+#   2. the identity ON that listener COVERS this router. This is the whole point
+#      of the change: the board used to be pinned to the image's placeholder pair
+#      (/etc/uhttpd.crt, CN=OpenWrt), which satisfies every existence check while
+#      covering neither the router's hostname nor its LAN IP, so a :8443 listener
+#      built on it is a hard certificate error in a browser. The module's
+#      provisioned identity is used instead, and the hop is armed only when that
+#      identity actually validates the address being used.
+#
+# The verdict comes from `cert_covers_router` above — the module's own
+# `tollgate ssl covers` — so the shell, the Go side and a browser cannot disagree
+# about what a usable identity means. It FAILS CLOSED: an unusable CLI is "does
+# not cover", which keeps the hop off rather than pointing a browser at an
+# identity nobody checked. An explicit value is written in both directions, so a
+# stale '1' from an earlier install is repaired rather than kept.
+if [ "$ADMIN_BOARD_ALLOWED" = "1" ] && uci -q get uhttpd.admin >/dev/null 2>&1; then
+    admin_cert=$(uci -q get uhttpd.admin.cert 2>/dev/null)
+    admin_key=$(uci -q get uhttpd.admin.key 2>/dev/null)
+    if [ -n "$admin_cert" ] && [ -r "$admin_cert" ] && [ -s "$admin_cert" ] &&
+       [ -n "$admin_key" ] && [ -r "$admin_key" ] && [ -s "$admin_key" ] &&
+       [ -n "$(uci -q get uhttpd.admin.listen_https 2>/dev/null)" ] &&
+       cert_covers_router "$admin_cert"; then
+        uci set uhttpd.admin.redirect_https='1'
+    else
+        uci set uhttpd.admin.redirect_https='0'
+    fi
+    uci commit uhttpd
+fi
+
+# Resolve .apk-new files left by apk when existing files were modified.
+find "$ADMIN_HOME" -name '*.apk-new' \
+    -exec sh -c 'mv "$1" "${1%.apk-new}"' _ {} \; 2>/dev/null
+
+/etc/init.d/rpcd restart
+/etc/init.d/uhttpd restart
+
+# Fail open: the redirect is only safe if the TLS listener it targets actually
+# came up - uhttpd can accept listen_https in config and still fail to bind
+# (unusable cert, port conflict), which would lock LuCI behind a dead redirect
+# again. Verify a LISTEN socket on the port THIS section owns and, if it is
+# missing, drop the redirect and restart once. This only ever turns the
+# redirect OFF.
+if uci -q get uhttpd.main >/dev/null 2>&1 &&
+   [ "$(uci -q get uhttpd.main.redirect_https 2>/dev/null)" = "1" ]; then
+    sleep 1
+    # Which port that listener is on follows the mapping: :443 while LuCI owns
+    # the entry pair, :8443 once the mode flip gives LuCI the secondary pair.
+    if ! awk -v p="$MAIN_TLS_RE" '$2 ~ (p "$") && $4 == "0A" { f = 1 } END { exit !f }' \
+             /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+        uci set uhttpd.main.redirect_https='0'
+        uci commit uhttpd
+        /etc/init.d/uhttpd restart
+    fi
+fi
+
+# Fail open, same shape, for the board's own hop: uhttpd accepts a listen_https
+# in config and can still fail to bind (unusable cert, port conflict), and a
+# plain-HTTP port that 307s into a dead TLS port is a board nobody can open — the
+# pre13 lockout, one surface over. Verify a LISTEN socket on the TLS port THIS
+# instance owns (:443 in board mode, :8443 in luci) and, if it is missing, drop
+# the hop and restart once. This only ever turns the redirect OFF.
+if [ "$ADMIN_BOARD_ALLOWED" = "1" ] && uci -q get uhttpd.admin >/dev/null 2>&1 &&
+   [ "$(uci -q get uhttpd.admin.redirect_https 2>/dev/null)" = "1" ]; then
+    sleep 1
+    # The port is the one THIS instance owns: :443 in board mode, :8443 in luci.
+    if ! awk -v p="$ADMIN_TLS_RE" '$2 ~ (p "$") && $4 == "0A" { f = 1 } END { exit !f }' \
+             /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+        uci set uhttpd.admin.redirect_https='0'
+        uci commit uhttpd
+        /etc/init.d/uhttpd restart
+    fi
+fi
+
+# ─── D4: announce the mapping protocol ───────────────────────────────────────
+#
+# The marker's CONTENT is the resolved value and its EXISTENCE means "the
+# mode-aware 92 is installed" (see the header). It is written on every COMPLETED
+# run and NOT by the refuse-to-serve path: ADMIN_BOARD_ALLOWED=0 took the admin
+# listeners off the air, so a router in that state must NOT advertise a mapping
+# whose entry pair nothing answers — the module's 99 then keeps the legacy luci
+# mapping and LuCI still answers the entry.
+#
+# A failed write is a WARNING, not a failure: the fallback is the legacy
+# mapping, which is a working router — a worse default face, not a broken one.
+if [ "${ADMIN_BOARD_ALLOWED}" = "1" ]; then
+    if ! { mkdir -p "$(dirname "$TOLLGATE_ENTRY_UI_MARKER")" 2>/dev/null &&
+           printf '%s\n' "$ENTRY_UI" > "$TOLLGATE_ENTRY_UI_MARKER" 2>/dev/null; }; then
+        echo "WARNING: could not write the entry_ui mapping marker ($TOLLGATE_ENTRY_UI_MARKER);" >&2
+        echo "WARNING:   the module's 99-tollgate-setup will keep the legacy luci mapping." >&2
+    fi
+fi
+
+exit 0
