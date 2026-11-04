@@ -146,6 +146,17 @@ jobs:
       - name: Run functional tests (mandatory)
         run: npx playwright test tests/e2e/functional.spec.mjs --project=desktop
 
+      - name: Run hermetic purchase-path gate (mandatory)
+        # The client-side PURCHASE PATH on a captive-portal-shaped origin: the
+        # shipped `build/` served over plain http on a non-loopback address, the
+        # router API stubbed on :2121, and a stub Cashu mint — real sockets, real
+        # CORS, real CSP. Needs `npm run build` (above) because it tests the
+        # BUILT document, not the dev server.
+        #
+        # It runs on the `mobile` project only (Pixel 7): the buyer is on a
+        # phone, and the assertions are the set W1/W2 inherit verbatim.
+        run: npx playwright test tests/e2e/hermetic-purchase.spec.mjs --project=mobile
+
       - name: Run visual tests (informational — allowed to fail)
         run: npx playwright test tests/e2e/visual.spec.mjs --project=desktop || true
 
