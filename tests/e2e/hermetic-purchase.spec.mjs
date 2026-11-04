@@ -548,8 +548,23 @@ test.describe('WWEB — hermetic captive-portal purchase path', () => {
       await expect(page.locator('.status.success .status-label')).toContainText(/valid cashu token/i, { timeout: 15000 });
 
       // The mint leg really ran: the fee pre-check hits /v1/keysets.
+      //
+      // POLL, do not assert — the label above and the mint call below come from
+      // two different effects in src/components/Cashu.jsx: validation (:138)
+      // sets the "valid" label, while getMintSwapFee (:170) is keyed on
+      // `[token, tokenValue]` so it cannot even start until that state update
+      // has rendered, and then it awaits a real fetch. The label is therefore
+      // visible strictly BEFORE the mint request is issued; asserting the
+      // journal immediately raced the effect and went red ~1 run in 3. The
+      // assertion is unchanged in strength (the mint call must still arrive),
+      // only the wait is real. Same shape as waitForActivated above.
+      await expect
+        .poll(() => rig.mint.journal.some((j) => j.path === '/v1/keysets'), {
+          timeout: 10000,
+          message: 'the mint fee pre-check must reach the mint',
+        })
+        .toBe(true);
       console.log(`  mint journal: ${JSON.stringify(rig.mint.journal)}`);
-      expect(rig.mint.journal.some((j) => j.path === '/v1/keysets'), 'the mint fee pre-check must reach the mint').toBe(true);
 
       const pay = page.locator('.tollgate-captive-portal-method-submit button.cta').first();
       await expect(pay).toBeEnabled();

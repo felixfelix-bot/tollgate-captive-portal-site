@@ -84,8 +84,13 @@ those are what installability is decided on.
 
 ## What it does not cover
 
-- The portal's CSP is `connect-src 'self' http: ws:`. A real **https** mint
-  would be blocked today; widening the CSP is a security-relevant change that
-  belongs in its own PR, not smuggled in behind a test.
+- The portal's CSP is `connect-src 'self' http: https: ws: wss:` in the built
+  document on this branch (it was `'self' http: ws:` before this branch's
+  install/CSP fix). An **https** mint is therefore permitted now, but nothing
+  here exercises one: the rig serves the mint over http, and proving an https
+  mint end to end needs TLS a captive portal cannot offer before the user has
+  paid. What CSP coverage *is* asserted is the negative direction — this suite
+  fails if a connect is blocked, because a CSP violation is the silent failure
+  mode that makes a working purchase path look broken.
 - The router itself. Nothing here touches hardware; the same spec re-points at
   `:2051` when a router rail is available.
