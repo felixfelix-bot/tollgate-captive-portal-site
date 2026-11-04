@@ -89,6 +89,15 @@ jobs:
         # identity covers this router, explicit in both directions, and dropped
         # again (fail open) when :8443 never came up.
         run: sh packaging/tests/test-92-admin-board-tls.sh
+      - name: Build the shipped tree
+        # BEFORE the vitest suite, because one unit file — tests/unit/
+        # sw-precache-assets.test.js — asserts against the BUILD artifact
+        # (build/splash.html + build/sw.js), not against source. Without the
+        # build those gates could only be skipped, and a unit job that silently
+        # skips its gates is green for the wrong reason.
+        #
+        # The coverage provider also sees the tree a human would. ~3s.
+        run: npm run build
       - name: Unit tests + coverage thresholds
         # Same suite as `npm test`, plus the coverage gate. The thresholds are
         # SCOPED (vitest.config.js) to the PWA install/shell surface this
@@ -96,10 +105,15 @@ jobs:
         # subsystems carry no unit tests, so a global 80% floor would be red for
         # reasons unrelated to any given diff. Running the coverage provider
         # here makes the scoped floor enforced rather than aspirational.
+        #
+        # CI_REQUIRE_BUILD turns "build/ is missing" from a skip into a failure:
+        # the step above just produced it, so its absence means the build broke
+        # and the precache gates must not quietly disappear.
+        env:
+          CI_REQUIRE_BUILD: '1'
         run: npm run test:coverage
       - name: Packaging guard (foreign-skin cleanup)
         run: sh tests/packaging/foreign-skins-guard.sh .
-      - run: npm run build
 
   e2e-tests:
     name: E2E tests + screenshots (Playwright)
