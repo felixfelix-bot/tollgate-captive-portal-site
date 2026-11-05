@@ -1,0 +1,18 @@
+[
+  {
+    "variant": "decision-first",
+    "console_errors": [],
+    "review_dialog": "pass",
+    "default_opt_in": false,
+    "acknowledgement": "pass",
+    "mobile_document_overflow": false
+  },
+  {
+    "variant": "evidence-first",
+    "console_errors": [],
+    "review_dialog": "pass",
+    "default_opt_in": false,
+    "acknowledgement": "pass",
+    "mobile_document_overflow": false
+  }
+]
