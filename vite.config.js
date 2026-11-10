@@ -46,7 +46,26 @@ function generateAssetManifestPlugin() {
 
 export default defineConfig({
   base: process.env.VITE_BASE_PATH || '/',
+  define: {
+    // Guest brand slot: the NORMALIZED id (lowercase, brand-id alphabet) — the same
+    // spelling build-all writes assets under. VITE_BRAND=ACME must resolve
+    // /assets/brand/acme/... or the logo 404s on case-sensitive filesystems.
+    // '' when unset/unusable, so the app falls back to the default logo and the
+    // unbranded bundle is unchanged.
+    'import.meta.env.VITE_BRAND': JSON.stringify(
+      (() => {
+        const raw = (process.env.VITE_BRAND || '').trim().toLowerCase();
+        return /^[a-z0-9][a-z0-9-]*$/.test(raw) ? raw : '';
+      })(),
+    ),
+  },
   plugins: [react(), generateAssetManifestPlugin()],
+  // The admin app (:5199) resolves `vite` out of the SAME node_modules symlink,
+  // so by default both dev servers share `node_modules/.vite`. Whichever
+  // optimizes last invalidates the other's pre-bundled deps and every module
+  // request then 504s with "Outdated Optimize Dep", rendering the page empty and
+  // unstyled. Opt-in only: unset, Vite uses its normal cache exactly as before.
+  cacheDir: process.env.VITE_CACHE_DIR || undefined,
   build: {
     outDir: "build",
     rollupOptions: {
