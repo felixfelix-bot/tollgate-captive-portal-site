@@ -1,13 +1,15 @@
 @media print {
   @page { margin: 12mm; }
 
-  /* Visibility alone retains the dashboard's layout and creates blank pages.
-     Remove unrelated boxes, but keep ancestor text nodes invisible too. */
-  body * { visibility: hidden !important; }
-  body *:not(:has(#guest-wifi-print-card)):not(#guest-wifi-print-card):not(#guest-wifi-print-card *) {
+  /* Scoped to a PREPARED card only. Without this guard the rules below would
+     apply on every route and every plain Ctrl+P would print a blank page. */
+  body:has(#guest-wifi-print-card) * { visibility: hidden !important; }
+  body:has(#guest-wifi-print-card) *:not(:has(#guest-wifi-print-card)):not(#guest-wifi-print-card):not(#guest-wifi-print-card *) {
     display: none !important;
   }
-  html, body, body *:has(#guest-wifi-print-card) {
+  html:has(#guest-wifi-print-card),
+  body:has(#guest-wifi-print-card),
+  body:has(#guest-wifi-print-card) *:has(#guest-wifi-print-card) {
     display: block !important;
     position: static !important;
     width: auto !important;
@@ -22,7 +24,10 @@
     font-size: 0 !important;
     visibility: hidden !important;
   }
-  #guest-wifi-print-card, #guest-wifi-print-card * { visibility: visible !important; }
+  /* Specificity note: the hiding rule above carries `:has(#id)` and therefore
+     outranks a bare `#id *`. The visible rules must repeat the ancestor. */
+  body:has(#guest-wifi-print-card) #guest-wifi-print-card,
+  body:has(#guest-wifi-print-card) #guest-wifi-print-card * { visibility: visible !important; }
   #guest-wifi-print-card {
     position: static;
     width: 100%;

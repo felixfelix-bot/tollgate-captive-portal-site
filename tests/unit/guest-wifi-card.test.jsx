@@ -29,7 +29,12 @@ describe('guest card component', () => {
     await act(() => render(null, host));
     await act(async () => { settle(stage === 'error' ? new Error('SECRET') : stage === 'encoder' ? '<svg/>' : {values:guest}); await Promise.resolve(); });
     expect(host.innerHTML).toBe('');
-    if (stage === 'fetch') expect(encoder).not.toHaveBeenCalled();
+    // NOTE: innerHTML alone does NOT prove the `generation` guard fires —
+    // Preact no-ops setState after unmount (BaseComponent.setState guards on
+    // this._vnode). What the guard really prevents is the fetch-then-encode
+    // continuation running after the card is gone: 'fetch' must never reach
+    // the encoder. The other two stages are covered for isolation only.
+    expect(encoder).toHaveBeenCalledTimes(stage === 'encoder' ? 1 : 0);
   });
   it('reads only the selected guest and discards credentials on hide and selection', async () => {
     ubusCall.mockResolvedValue({ values: guest }); await mount(); await click('Prepare guest card');

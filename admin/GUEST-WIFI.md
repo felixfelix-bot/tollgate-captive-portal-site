@@ -41,6 +41,16 @@ Value boundaries are pinned in bytes: a 32-byte SSID is accepted and 33 rejected
 accepted and 64 rejected, and `psk`/`psk2`/`psk-mixed` with `tkip`,
 `tkip+ccmp` or `ccmp` cipher suffixes encode as `T:WPA`.
 
+The print stylesheet activates only while a prepared card exists
+(`body:has(#guest-wifi-print-card)`); on every other page and on WiFi before a
+card is prepared, Ctrl+P prints that page normally rather than a blank sheet.
+Card content is the only visible thing in print media.
+
+Preact no-ops `setState` after unmount, so the unmount cases assert the fetch
+continuation never reaches the QR encoder — that is the `generation` guard's
+externally observable effect. A second concurrent fetch is not user-reachable:
+the prepare button is disabled while a request is in flight.
+
 ## Verification boundaries
 
 Unit tests exercise payload and allowlist guards. Admin Playwright tests use

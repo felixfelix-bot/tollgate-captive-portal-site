@@ -22,6 +22,16 @@ for (const action of ['Refresh', 'Save']) test(`card invalidates on ${action}`, 
   const decoded = await image.evaluate(async (img, url) => (await import(url)).default.scanImage(img, {returnDetailedScanResult:true}), scannerUrl);
   expect(decoded.data).toBe('WIFI:T:nopass;S:Changed Guest;H:false;;');
 });
+test('print media without a prepared card prints the page normally', async ({ page }) => {
+  await page.goto('./#/wifi');
+  await expect(page.getByRole('button', { name: 'Prepare guest card' })).toBeVisible();
+  await page.emulateMedia({ media: 'print' });
+  // The print stylesheet must take over ONLY while a card is rendered; otherwise
+  // a plain Ctrl+P on any other route would print a blank page.
+  await expect(page.locator('.app-header')).toBeVisible();
+  await expect(page.locator('.app-header')).not.toHaveCSS('display', 'none');
+  await page.emulateMedia({ media: 'screen' });
+});
 test('Refresh discards a pending credential snapshot', async ({ page }) => {
   await page.route('**/src/lib/ubus.mock.ts*', async route => {
     const response = await route.fetch();
