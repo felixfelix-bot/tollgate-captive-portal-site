@@ -21,4 +21,21 @@ describe('guest Wi-Fi QR', () => {
   it.each(['psk','psk2','psk-mixed','psk2+ccmp'])('supports personal encryption %s', encryption => {
     expect(guestWifiPayload('tollgate_2g_open', {...guest,encryption,key:'password',hidden:true})).toBe('WIFI:T:WPA;S:Cafe;P:password;H:true;;');
   });
+  it.each(['psk+tkip','psk2+tkip','psk-mixed+tkip+ccmp','psk2+tkip+ccmp'])('supports TKIP cipher suffix %s', encryption => {
+    expect(guestWifiPayload('tollgate_2g_open', {...guest,encryption,key:'password'})).toBe('WIFI:T:WPA;S:Cafe;P:password;H:false;;');
+  });
+  describe('value boundaries', () => {
+    it('accepts a 32-byte SSID and rejects 33 bytes', () => {
+      expect(guestWifiPayload('tollgate_2g_open', {...guest, ssid: 'a'.repeat(32)})).toBe(`WIFI:T:nopass;S:${'a'.repeat(32)};H:false;;`);
+      expect(() => guestWifiPayload('tollgate_2g_open', {...guest, ssid: 'a'.repeat(33)})).toThrow();
+      // Multibyte characters count in BYTES, not code points: 16 × 'é' = 32 bytes.
+      expect(guestWifiPayload('tollgate_2g_open', {...guest, ssid: 'é'.repeat(16)})).toContain('S:éé');
+      expect(() => guestWifiPayload('tollgate_2g_open', {...guest, ssid: 'é'.repeat(17)})).toThrow();
+    });
+    it('accepts a 63-character passphrase and rejects 64', () => {
+      const key63 = 'k'.repeat(63);
+      expect(guestWifiPayload('tollgate_2g_open', {...guest, encryption:'psk2', key:key63})).toBe(`WIFI:T:WPA;S:Cafe;P:${key63};H:false;;`);
+      expect(() => guestWifiPayload('tollgate_2g_open', {...guest, encryption:'psk2', key:'k'.repeat(64)})).toThrow();
+    });
+  });
 });

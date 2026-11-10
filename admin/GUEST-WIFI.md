@@ -36,6 +36,10 @@ Component tests cover targeted section reads, missing/unsafe RPC replies,
 redaction of transport errors, pending controls, retry, print, hide and radio
 changes. Browser tests also check the pre-auth gate and session-expiry removal.
 Disabled flags fail closed: only absent, false, zero or `"0"` are enabled.
+Value boundaries are pinned in bytes: a 32-byte SSID is accepted and 33 rejected
+(multibyte characters count as their UTF-8 length), a 63-character passphrase is
+accepted and 64 rejected, and `psk`/`psk2`/`psk-mixed` with `tkip`,
+`tkip+ccmp` or `ccmp` cipher suffixes encode as `T:WPA`.
 
 ## Verification boundaries
 
