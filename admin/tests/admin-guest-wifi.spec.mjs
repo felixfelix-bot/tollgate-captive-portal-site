@@ -140,6 +140,59 @@ for (const format of ['A4', 'Letter']) test(`Unicode card prints one ${format} p
   const qr = await image.boundingBox();
   expect(qr.width).toBeGreaterThanOrEqual(260); expect(qr.width).toBeLessThanOrEqual(340);
 });
+test('rendered QR keeps a 4-module quiet zone on every side', async ({ page }) => {
+  await page.goto('./#/wifi');
+  await page.getByRole('button', { name: 'Prepare guest card' }).click();
+  const image = page.getByAltText('Scan to join guest Wi-Fi');
+  await expect(image).toBeVisible();
+  // Measure the QUIET ZONE from rendered PIXELS, not from encoder options and not
+  // from SVG path text (the module path uses relative deltas, so its numbers are
+  // not coordinates). A decoder can still succeed with a thin margin, so QR width
+  // alone proves nothing. Scale: the SVG viewBox is modules + 2*margin, rendered
+  // into `width`, so one module is width/viewBoxSize pixels.
+  const zone = await page.evaluate(async () => {
+    const img = document.querySelector('img[alt="Scan to join guest Wi-Fi"]');
+    const svg = decodeURIComponent(img.src.split(',').slice(1).join(','));
+    const vb = svg.match(/viewBox="0 0 (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)"/);
+    if (!vb) throw new Error('QR SVG has no viewBox');
+    const viewBox = Number(vb[1]);
+    const px = await new Promise((resolve, reject) => {
+      const probe = new Image();
+      probe.onload = () => resolve(probe);
+      probe.onerror = reject;
+      probe.src = img.src;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = px.naturalWidth; canvas.height = px.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(px, 0, 0);
+    const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let minX = width, minY = height, maxX = -1, maxY = -1;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        // Any non-white pixel belongs to a module (the QR is black on white).
+        if (data[(y * width + x) * 4] < 128) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < 0) throw new Error('QR rendered no dark modules');
+    return {
+      modulePx: width / viewBox,
+      left: minX, top: minY, right: width - 1 - maxX, bottom: height - 1 - maxY,
+    };
+  });
+  // Require >= 4 modules of blank space on all four sides. Allow 1px of rounding.
+  const minimum = 4 * zone.modulePx - 1;
+  expect(zone.modulePx).toBeGreaterThan(1);
+  expect(zone.left).toBeGreaterThanOrEqual(minimum);
+  expect(zone.top).toBeGreaterThanOrEqual(minimum);
+  expect(zone.right).toBeGreaterThanOrEqual(minimum);
+  expect(zone.bottom).toBeGreaterThanOrEqual(minimum);
+});
 test('WPA special characters decode and changing radio clears credentials', async ({ page }) => {
   await page.addInitScript(() => sessionStorage.setItem('tg.mock.guest_wifi', JSON.stringify({ '.type':'wifi-iface', mode:'ap',network:'lan',ssid:'Café;:"',encryption:'psk2',key:'guest;password',hidden:'1' })));
   await page.goto('./#/wifi');
