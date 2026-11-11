@@ -156,6 +156,9 @@ test('rendered QR keeps a 4-module quiet zone on every side', async ({ page }) =
     const vb = svg.match(/viewBox="0 0 (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)"/);
     if (!vb) throw new Error('QR SVG has no viewBox');
     const viewBox = Number(vb[1]);
+    // A QR is square, but do not ASSUME it: a non-square viewBox would mean the
+    // per-axis module size differs and the margin math below would be wrong.
+    if (Number(vb[2]) !== viewBox) throw new Error(`QR viewBox is not square: ${vb[1]}x${vb[2]}`);
     const px = await new Promise((resolve, reject) => {
       const probe = new Image();
       probe.onload = () => resolve(probe);
