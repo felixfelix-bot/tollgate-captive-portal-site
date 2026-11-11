@@ -24,8 +24,10 @@ Unicode and escaped punctuation, and renders a print PDF.
 
 Use Node 22.17.0 and `npm ci`. Run `npm test`, `npm run build`,
 `npx tsc --noEmit -p admin/tsconfig.json`, and `npm run test:admin`.
-The print roundtrip requires Poppler's `pdftoppm` on PATH: it rasterizes the
-actual Chromium PDF and decodes that raster, independently of the screen SVG.
+The print roundtrip requires Poppler's `pdfinfo`, `pdftotext` and `pdftoppm` on
+PATH: it rasterizes the actual Chromium PDF and decodes that raster, independently
+of the screen SVG. Those three print tests SKIP with an explicit reason when
+Poppler is absent (no false pass); the other eight browser tests still run.
 For focused helper and Preact component coverage:
 
 ```sh

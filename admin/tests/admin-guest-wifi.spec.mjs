@@ -3,6 +3,23 @@ import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 const scannerUrl = '/@fs' + createRequire(import.meta.url).resolve('qr-scanner/qr-scanner.min.js');
+
+// The print assertions inspect the ACTUAL Chromium PDF, which needs Poppler.
+// Probe once and SKIP only the tests that need it: a missing prerequisite must
+// never read as a product failure ("spawnSync pdfinfo ENOENT") and must never be
+// counted as a pass. The 7 non-print tests still run.
+function popplerMissing() {
+  return ['pdfinfo', 'pdftotext', 'pdftoppm'].filter(tool => {
+    try { execFileSync(tool, ['-v'], { stdio: 'ignore' }); return false; }
+    catch (err) { return err.code === 'ENOENT'; }
+  });
+}
+const MISSING_POPPLER = popplerMissing();
+const NEED_POPPLER = MISSING_POPPLER.length
+  ? `Print verification needs Poppler (missing: ${MISSING_POPPLER.join(', ')}); ` +
+    'install poppler-utils (Debian/Ubuntu) or poppler (Homebrew). These assertions ' +
+    'decode the rendered PDF, so they cannot run without it.'
+  : '';
 // Browser UI is real; RPC data is the existing synthetic mock, not router ACL proof.
 for (const action of ['Refresh', 'Save']) test(`card invalidates on ${action}`, async ({ page }) => {
   await page.goto('./#/wifi');
@@ -55,6 +72,7 @@ export async function mockUbusCall(obj, method, params = {}) {
   await expect(page.getByAltText('Scan to join guest Wi-Fi')).toHaveCount(0);
 });
 test('guest QR roundtrip and print-only card', async ({ page }) => {
+  test.skip(MISSING_POPPLER.length > 0, NEED_POPPLER);
   await page.goto('./');
   await page.locator('.nav-item', { hasText: 'WiFi' }).click();
   await page.getByRole('button', { name: 'Prepare guest card' }).click();
@@ -84,6 +102,7 @@ test('guest QR roundtrip and print-only card', async ({ page }) => {
   await expect(image).toHaveCount(0);
 });
 for (const format of ['A4', 'Letter']) test(`Unicode card prints one ${format} page`, async ({ page }, testInfo) => {
+  test.skip(MISSING_POPPLER.length > 0, NEED_POPPLER);
   await page.addInitScript(() => sessionStorage.setItem('tg.mock.guest_wifi', JSON.stringify({ '.type':'wifi-iface',mode:'ap',network:'lan',ssid:'Café;餐厅',encryption:'psk2',key:'guest;password',hidden:'1' })));
   await page.goto('./#/wifi');
   await page.getByRole('button', {name:'Prepare guest card'}).click();
